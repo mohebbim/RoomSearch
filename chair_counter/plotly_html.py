@@ -66,9 +66,9 @@ STACK_SHOWN = 6
 
 STATES = (
     ("floor", "#ffffff", "not reached yet"),
-    ("wall", "#ced4da", "wall, not found yet"),
-    ("wall-found", "#868e96", "wall found by an earlier area"),
-    ("wall-current", "#9775fa", "wall around the area being filled"),
+    ("wall", "#ced4da", "wall (input)"),
+    ("wall-found", "#868e96", "wall detected earlier"),
+    ("wall-current", "#9775fa", "wall detected"),
     ("outside", "#dee2e6", "outside the building"),
     ("problem", "#e03131", "area rejected by _add_area"),
     ("stack", "#66d9e8", "waiting on the stack"),

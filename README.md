@@ -76,7 +76,21 @@ The page fits the browser window and has these controls:
 - ◀ ▶ (arrow keys) to move one step, and ⏮ Area / Area ⏭ (Page Up / Page Down) to jump to where an area starts.
 - A slider to jump to any step. Hover over a cell to see what it holds.
 
-It loads Plotly from the internet, so it needs a connection to open. [docs/solution.md](docs/solution.md#watching-the-search) explains the colours.
+It loads Plotly from the internet, so it needs a connection to open.
+
+| Colour | Meaning |
+| --- | --- |
+| Magenta | The cell being expanded. |
+| Cyan | Cells waiting on the stack. |
+| Green / red / blue | The neighbour just checked was pushed, was a wall, or had already been reached. |
+| Orange | A chair or label was recorded. |
+| Dark yellow, pale yellow | The scan starts a new area here, after walking past the pale yellow cells. |
+| Light grey | Wall (input): not reached yet. |
+| Violet | Wall detected by the area being filled, so its outline appears as it fills. |
+| Dark grey | Wall detected earlier, by a finished area. |
+| Pale grey, pastels, red | The outside, each enclosed area, a rejected area. |
+
+The page is made by `chair_counter/plotly_html.py`. It runs the same search functions as `count_chairs`, through an optional `trace` hook that does nothing during a normal count.
 
 ## Project layout
 
@@ -88,4 +102,4 @@ It loads Plotly from the internet, so it needs a connection to open. [docs/solut
 | `inputs/` | Sample plans: `rooms.txt` (supplied), `studio.txt`, `family_house.txt`, `bungalow.txt`. |
 | `output/` | A report for each sample plan and `search.html` with all of them, made with the folder command above. |
 | `tests/` | Unit tests. Run them with `python -m unittest -v`. |
-| `docs/solution.md` | How the algorithm works and the input rules. |
+| `docs/solution.md` | The search algorithm, step by step, with a worked example. |
