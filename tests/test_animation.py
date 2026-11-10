@@ -126,6 +126,7 @@ class AnimationTests(unittest.TestCase):
         for area in _find_areas(grid, labels, watch):
             recorder.area_finished(area)
         recorder.finish()
+        recorder.scan_path = set()  # The last step highlights the scan path; look past it.
 
         self.assertEqual(states[0], {"wall"})  # Before the outside is filled.
         self.assertIn("wall-found", states[1])  # The outer walls, found by the outside.

@@ -37,7 +37,8 @@ Colours in each frame:
 | Green / red / blue | The neighbour just checked was pushed, was a wall, or had already been reached. |
 | Orange | A chair or label was recorded. |
 | Dark yellow, pale yellow | The scan starts a new area here, after walking past the pale yellow cells (walls and cells already in an area). |
-| Grey | The outside. Each enclosed area has its own colour, and a rejected area is red. |
+| Light grey, violet, dark grey | Walls: not found yet, found by the area being filled (its outline appears as it fills), found by an earlier area. |
+| Pale grey | The outside. Each enclosed area has its own colour, and a rejected area is red. |
 
 ## Changing the format
 
