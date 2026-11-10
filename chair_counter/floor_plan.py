@@ -13,8 +13,8 @@ This module holds all of the counting logic. ``count_chairs`` runs four steps:
    its chairs to the ``ChairReport``.
 
 ``format_report`` then turns the report into the text format the old system
-reads. The visualisers in ``visualize.py`` and ``plotly_html.py`` reuse these
-same functions through the optional ``trace`` hook described in ``Trace``.
+reads. The animation in ``plotly_html.py`` reuses these same functions
+through the optional ``trace`` hook described in ``Trace``.
 """
 
 import re

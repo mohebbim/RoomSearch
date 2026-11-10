@@ -1,11 +1,23 @@
 """Write an animated web page of the chair counter's search, one frame per step.
 
-Run ``python -m chair_counter.visualize PLAN... --html search.html``, or
-``python -m chair_counter PLAN --output DIR --animation`` for a single plan.
+The page is made by ``python -m chair_counter PLAN --output DIR --animation``.
 
-The page shows the same steps as the terminal view, because ``FrameRecorder``
-is a ``Visualiser`` that records frames instead of drawing them. By default
-every step is a frame, so nothing happens between two frames.
+This module has no counting logic of its own. It runs the real search from
+``floor_plan.py`` (``_parse_plan``, ``_find_areas`` and ``_add_area``) and passes
+``FrameRecorder.trace`` as the search's ``trace`` hook. Each event the search
+reports becomes one numbered step with a plain-English explanation, such as
+"Look below line 3, col 5: line 4, col 5 is a wall '-', blocked.", and one
+frame of the animation.
+
+How the pieces fit together:
+
+- ``FrameRecorder`` turns the events into steps. It keeps what is needed to
+  draw them (the stack, which area owns each cell, the report so far) and
+  records the colour of every cell after each step.
+- ``write_html`` records every plan and writes one page with all of them.
+- ``PAGE`` is the page: Plotly draws the grid as a heatmap, and a small script
+  plays the frames. It loads Plotly.js from its CDN, so opening it needs
+  internet.
 
 Storing every step as a full grid would make the page very large, so frames
 are stored compactly:
@@ -15,27 +27,27 @@ are stored compactly:
   ``KEYFRAME_EVERY`` frames.
 - Each frame stores only the cells that changed since the frame before, as
   ``[cell index, code, cell index, code, ...]``.
-
-The page rebuilds a frame from the nearest keyframe, draws the grid as a Plotly
-heatmap with the plan's characters on top, and plays the frames with its own
-controls. It loads Plotly.js from its CDN, so opening it needs internet.
 """
 
-import io
 import json
 import math
+from collections import Counter
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from string import Template
-from typing import Any, TextIO
+from typing import Any
 
-from .floor_plan import Position, _parse_plan, format_report
-from .visualize import (
-    ShownArea,
-    Visualiser,
-    estimate_steps,
-    trace_plan,
-    write_result,
+from .floor_plan import (
+    CHAIR_TYPES,
+    WALLS,
+    Area,
+    ChairReport,
+    Position,
+    _add_area,
+    _find_areas,
+    _parse_plan,
+    format_report,
 )
 
 PLOTLY_URL = "https://cdn.plot.ly/plotly-2.35.2.min.js"
@@ -45,6 +57,12 @@ MAX_FRAMES = 20000
 
 KEYFRAME_EVERY = 200
 """Frames between full snapshots. Jumping to any frame replays at most this many."""
+
+DIRECTIONS = {(-1, 0): "above", (1, 0): "below", (0, -1): "left of", (0, 1): "right of"}
+"""Words for the four neighbour offsets, in the order ``_walk_area`` checks them."""
+
+STACK_SHOWN = 6
+"""How many stack entries the status panel lists before saying "and N more"."""
 
 STATES = (
     ("floor", "#ffffff", "not reached yet"),
@@ -60,7 +78,7 @@ STATES = (
     ("look-visited", "#4dabf7", "neighbour already reached"),
     ("look-record", "#ff922b", "chair or label recorded"),
 )
-"""Each cell state from ``Visualiser.cell_state`` with its colour and legend text.
+"""Each cell state from ``FrameRecorder.cell_state`` with its colour and legend text.
 
 A state's position in this tuple is its colour code.
 """
@@ -73,16 +91,79 @@ FIRST_CODE_CHAR = ord("A")
 """Keyframes store code ``n`` as the character ``chr(FIRST_CODE_CHAR + n)``."""
 
 
-class FrameRecorder(Visualiser):
-    """A ``Visualiser`` that records frames for the web page instead of drawing them.
+def counts_text(chairs: Counter[str]) -> str:
+    """Format chair counts in report order, including zeros: ``W: 1, P: 0, S: 0, C: 2``."""
+    return ", ".join(f"{chair}: {chairs[chair]}" for chair in CHAIR_TYPES)
 
-    The recorder keeps ``codes``, the colour code of every cell in the latest
-    frame. When recording every step, only the cells that can have changed are
+
+def _upper_first(text: str) -> str:
+    """Capitalise the first letter only, so room names keep their own case."""
+    return text[:1].upper() + text[1:]
+
+
+@dataclass
+class ShownArea:
+    """An area found by the search, plus what the page needs to know about it.
+
+    Attributes:
+        number: Order in which the scan found the area. 0 is the outside.
+        area: The ``Area`` object the search is filling. It is updated live, so
+            its cells, chairs and labels grow while the area is being filled.
+        start: The cell where the scan started this area.
+        problem: The error ``_add_area`` raised for this area, if any.
+    """
+
+    number: int
+    area: Area
+    start: Position
+    problem: str | None = None
+
+    @property
+    def outside(self) -> bool:
+        """Whether this is the outside of the building, using ``Area.is_exterior``."""
+        # Before the first cell is recorded, ask the same question of the start cell.
+        area = self.area if self.area.cells else Area([self.start], Counter(), [])
+        return area.is_exterior
+
+    @property
+    def name(self) -> str:
+        """A short name for step text, such as "the outside" or "area 2 (kitchen)"."""
+        if self.outside:
+            return "the outside"
+        label = f" ({', '.join(self.area.names)})" if self.area.names else ""
+        return f"area {self.number}{label}"
+
+
+class FrameRecorder:
+    """Turn the search's trace events into numbered steps and record a frame per step.
+
+    The search calls ``trace`` for every event (see ``floor_plan.Trace``), and
+    ``trace_plan`` calls ``area_finished`` after each area and ``finish`` at the
+    end. Each of these produces one step through ``_step``, which updates the
+    step text and the highlighted cells, then records a frame.
+
+    A frame has two parts:
+
+    - The colour code of every cell, decided by ``cell_state``: the cell being
+      looked at, the cell being expanded, cells on the stack, filled areas,
+      walls and untouched floor. Only the changes are stored, in ``deltas``.
+    - The status lines from ``status_lines``: the current step, the top of the
+      stack, the area being filled, and the report so far.
+
+    When recording every step, only the cells that can have changed are
     recomputed: the cells highlighted in this frame or the last one, and the
     cells that joined or left the stack. Everything is recomputed for the first
     frame, when frames skip steps, and when an area is rejected and turns red.
 
     Attributes:
+        report: The report built by calling ``_add_area`` on each finished area,
+            exactly as ``count_chairs`` does.
+        shown: Every area found so far, in scan order.
+        current: The area being filled, or ``None`` once the scan has finished.
+        first_error: The first rule violation, which is the error
+            ``count_chairs`` would raise. ``None`` if the plan is valid.
+        label_text: The label characters ``_parse_plan`` removed from the grid,
+            by position, so the page can still show room names.
         codes: The colour code of every cell, row by row, in the latest frame.
         keyframes: A full snapshot of ``codes`` every ``KEYFRAME_EVERY`` frames.
         deltas: For each frame, the changed cells as ``[index, code, ...]``,
@@ -91,16 +172,44 @@ class FrameRecorder(Visualiser):
         area_starts: Frame numbers where the scan starts a new area.
     """
 
-    def __init__(self, plan: str, grid: list[str], every: int) -> None:
+    def __init__(self, plan: str, grid: list[str], every: int = 1) -> None:
         """Prepare to record one plan.
 
         Args:
-            plan: The plan text, used to show room labels.
+            plan: The plan text, used to show room labels in the grid.
             grid: The padded grid from ``_parse_plan``.
             every: Record a frame every this many steps. A frame is also
                 recorded at the first step and whenever an area starts or ends.
         """
-        super().__init__(plan, grid, io.StringIO(), every=every, log=False)
+        self.grid = grid
+        self.height, self.width = len(grid), len(grid[0])
+        self.every = every
+        self.label_text: dict[Position, str] = {}
+        for row, line in enumerate(plan.splitlines(), start=1):
+            for column, char in enumerate(line, start=1):
+                if char != " " and grid[row][column] == " ":
+                    self.label_text[row, column] = char
+
+        # Search state, updated by the trace events.
+        self.report = ChairReport(total=Counter(), rooms={})
+        self.shown: list[ShownArea] = []
+        self.owner: dict[Position, ShownArea] = {}  # Area of every popped cell.
+        self.current: ShownArea | None = None
+        self.stack: list[Position] = []
+        self.first_error: str | None = None
+        self.skipped: Counter[str] = Counter()  # Scan cells passed since the last step,
+        self.skipped_cells: list[Position] = []  # by kind and by position.
+
+        # The current step.
+        self.step_number = 0
+        self.step_text = ""
+        self.next_frame = 1  # Always record the first step.
+        self.focus: Position | None = None  # The cell the current step looks at.
+        self.focus_style = ""  # How that look turned out, e.g. "wall" or "added".
+        self.source: Position | None = None  # The cell being expanded.
+        self.scan_path: set[Position] = set()  # Cells the scan just walked past.
+
+        # Recorded frames.
         self.codes = [[STATE_CODES["floor"]] * self.width for _ in range(self.height)]
         self.keyframes: list[str] = []
         self.deltas: list[list[int]] = []
@@ -110,14 +219,282 @@ class FrameRecorder(Visualiser):
         self._last_stack: set[Position] = set()
         self._last_problems = 0
 
-    def trace(self, event: str, position: Position, **details: Any) -> None:
-        """Note where new areas start, then handle the event as usual."""
-        if event == "scan" and details["result"] == "new area":
-            self.area_starts.append(len(self.statuses))  # The frame about to be recorded.
-        super().trace(event, position, **details)
+    # Search events ----------------------------------------------------------
 
-    def show_frame(self, long_pause: bool) -> None:
-        """Record the current state as a frame. Called by ``Visualiser._step``."""
+    def trace(self, event: str, position: Position, **details: Any) -> None:
+        """Receive one event from the search and turn it into a step.
+
+        This is the ``trace`` function passed to ``_find_areas``. Scan events for
+        walls and visited cells are only collected here; they are reported
+        together with the next step, which shows them as the scan path, so the
+        page is not flooded with them. The start of a new area always gets a
+        frame, so it is never skipped.
+
+        Args:
+            event: ``"scan"``, ``"visit"``, ``"check"``, ``"label"`` or ``"chair"``.
+            position: The cell the event is about.
+            **details: Extra data for the event, described in ``floor_plan.Trace``.
+        """
+        if event == "scan":
+            if details["result"] != "new area":
+                self.skipped[details["result"]] += 1
+                self.skipped_cells.append(position)
+                return
+            self.area_starts.append(len(self.statuses))  # The frame about to be recorded.
+            self.current = ShownArea(len(self.shown), details["area"], position)
+            self.shown.append(self.current)
+            self.stack = [position]
+            passed, path = self._scan_passed()
+            self._step(
+                f"{passed}{self._where(position)} is open and in no area "
+                f"yet, so start {self.current.name} here and push it onto the stack.",
+                focus=position,
+                style="scan",
+                scan_path=path,
+                force=True,
+            )
+        elif event == "visit":
+            self.stack = details["stack"]  # The live stack, so frames stay current.
+            self.owner[position] = self.current
+            self._step(
+                f"Pop {self._where(position)} from the stack into {self.current.name}, "
+                "then check its four neighbours.",
+                source=position,
+            )
+        elif event == "check":
+            self._check_step(position, details["source"], details["result"])
+        elif event == "label":
+            self._step(
+                f"The label ({details['name']}) starts at {self._where(position)}, "
+                f"so record that name for {self.current.name}.",
+                focus=position,
+                style="record",
+            )
+        elif event == "chair":
+            self._step(
+                f"{self._where(position)} holds chair {details['chair']}. "
+                f"{_upper_first(self.current.name)} now has "
+                f"{counts_text(details['area'].chairs)}.",
+                focus=position,
+                style="record",
+            )
+
+    def area_finished(self, area: Area) -> None:
+        """Add a finished area to the report, as ``count_chairs`` does, and explain it.
+
+        ``count_chairs`` stops at the first rule violation. The recorder marks
+        the area as a problem and carries on, so the rest of the plan can still
+        be seen. ``first_error`` keeps the error ``count_chairs`` would raise.
+
+        Args:
+            area: The area ``_find_areas`` has just yielded.
+        """
+        shown = self.current
+        done = f"The stack is empty, so {shown.name} is complete with {len(area.cells)} cells."
+        try:
+            _add_area(self.report, area)
+        except ValueError as error:
+            shown.problem = str(error)
+            if self.first_error is None:
+                self.first_error = str(error)
+            text = f"{done} _add_area rejects it: {error}"
+        else:
+            if shown.outside:
+                text = f"{done} It is the outside of the building, so nothing is counted."
+            elif area.names:
+                text = (
+                    f"{done} _add_area records room {area.names[0]!r} with "
+                    f"{counts_text(area.chairs)} and adds them to the total."
+                )
+            else:
+                text = (
+                    f"{done} It has no label, so _add_area adds its chairs "
+                    f"({counts_text(area.chairs)}) to the total only."
+                )
+        self._step(text, force=True)
+
+    def finish(self) -> None:
+        """Add the last step, after the scan has passed the final cell."""
+        self.current = None
+        passed, path = self._scan_passed()
+        self._step(
+            f"{passed}The scan has reached the end of the grid, "
+            "so every open cell belongs to an area.",
+            scan_path=path,
+            force=True,
+        )
+
+    # Step text --------------------------------------------------------------
+
+    def _check_step(self, position: Position, source: Position, result: str) -> None:
+        """Explain the check of one neighbour, e.g. "Look below …: … is a wall '-', blocked."
+
+        Args:
+            position: The neighbour that was checked.
+            source: The cell being expanded.
+            result: ``"off grid"``, ``"visited"``, ``"wall"`` or ``"added"``.
+        """
+        offset = (position[0] - source[0], position[1] - source[1])
+        look = f"Look {DIRECTIONS[offset]} {self._where(source)}: "
+        where = self._where(position)
+        if result == "off grid":
+            self._step(look + "that is beyond the edge of the grid, skip.", source=source)
+            return
+        if result == "visited":
+            text = f"{where} was already reached, skip."
+        elif result == "wall":
+            text = f"{where} is a wall {self.grid[position[0]][position[1]]!r}, blocked."
+        else:
+            text = f"{where} is {self.describe(position)}, so mark it reached and push it."
+        self._step(look + text, focus=position, style=result, source=source)
+
+    def _scan_passed(self) -> tuple[str, list[Position]]:
+        """Summarise and reset the scan cells skipped since the last step.
+
+        Returns:
+            A sentence such as "The scan moves past 12 cells (5 walls, 7 already
+            in an area). ", or an empty string if nothing was skipped, and the
+            skipped cells, to be shown as the scan path.
+        """
+        path, self.skipped_cells = self.skipped_cells, []
+        if not self.skipped:
+            return "", path
+        walls, visited = self.skipped["wall"], self.skipped["visited"]
+        self.skipped.clear()
+        text = (
+            f"The scan moves past {walls + visited} cells "
+            f"({walls} walls, {visited} already in an area). "
+        )
+        return text, path
+
+    def _is_border(self, position: Position) -> bool:
+        """Whether a cell is in the blank border that ``_parse_plan`` adds."""
+        row, column = position
+        return row in (0, self.height - 1) or column in (0, self.width - 1)
+
+    def _where(self, position: Position) -> str:
+        """Name a cell as it appears in the plan file, e.g. "line 3, col 5".
+
+        Grid row r is line r of the file and grid column c is column c, because
+        of the one-cell border. Border cells are not in the file, so they are
+        named by grid position instead, e.g. "border cell (0, 4)".
+        """
+        row, column = position
+        if self._is_border(position):
+            return f"border cell ({row}, {column})"
+        return f"line {row}, col {column}"
+
+    def describe(self, position: Position) -> str:
+        """Say what a cell holds: a wall, a chair, label text, border or floor."""
+        char = self.grid[position[0]][position[1]]
+        if position in self.label_text:
+            return f"label text {self.label_text[position]!r}, which counts as floor"
+        if char in WALLS:
+            return f"wall {char!r}"
+        if char in CHAIR_TYPES:
+            return f"chair {char!r}"
+        if self._is_border(position):
+            return "blank border"
+        return "floor"
+
+    def hover_text(self, position: Position) -> str:
+        """Describe a cell for the page's hover box, e.g. "line 3, col 5: chair 'W'"."""
+        return f"{self._where(position)}: {self.describe(position)}"
+
+    def status_lines(self) -> list[str]:
+        """Describe the current state in a few lines of text.
+
+        Returns:
+            The step number and area, the step's explanation, the top of the
+            stack, the current area's cells, chairs and labels so far, and the
+            report so far.
+        """
+        where = self.current.name if self.current else "scanning"
+        lines = [f"Step {self.step_number} | {where}", self.step_text]
+        top = [self._where(cell) for cell in reversed(self.stack[-STACK_SHOWN:])]
+        more = f" and {len(self.stack) - STACK_SHOWN} more" if len(self.stack) > STACK_SHOWN else ""
+        lines.append(
+            f"Stack ({len(self.stack)}, next pop first): {'; '.join(top) or 'empty'}{more}"
+        )
+        if self.current is not None:
+            area = self.current.area
+            lines.append(
+                f"{_upper_first(self.current.name)} so far: {len(area.cells)} cells, "
+                f"{counts_text(area.chairs)}, labels: {', '.join(area.names) or 'none'}"
+            )
+        rooms = ", ".join(self.report.rooms) or "none yet"
+        lines.append(f"Report so far: total {counts_text(self.report.total)} | rooms: {rooms}")
+        return lines
+
+    # Frames -----------------------------------------------------------------
+
+    def _step(
+        self,
+        text: str,
+        focus: Position | None = None,
+        style: str = "",
+        source: Position | None = None,
+        scan_path: Sequence[Position] = (),
+        force: bool = False,
+    ) -> None:
+        """Record one step, and a frame if one is due.
+
+        Args:
+            text: The explanation of the step.
+            focus: The cell this step looks at, if any.
+            style: How the look turned out, which sets the focus cell's colour:
+                ``"scan"``, ``"added"``, ``"wall"``, ``"visited"`` or ``"record"``.
+            source: The cell being expanded, if any.
+            scan_path: Cells the scan walked past to reach this step.
+            force: Record a frame even if one is not due, e.g. when an area
+                starts or is done.
+        """
+        self.step_number += 1
+        self.step_text = text
+        self.focus, self.focus_style, self.source = focus, style, source
+        self.scan_path = set(scan_path)
+        if self.step_number >= self.next_frame or force:
+            self.next_frame = self.step_number + self.every
+            self._record_frame()
+
+    def cell_state(
+        self, position: Position, stack_cells: set[Position]
+    ) -> tuple[str, ShownArea | None]:
+        """Decide how a cell should look in the current frame.
+
+        The first matching state wins, so the cell being looked at always stands
+        out, even if it is also on the stack or in an area.
+
+        Args:
+            position: The cell to classify.
+            stack_cells: The cells currently on the stack, as a set.
+
+        Returns:
+            The state and the area that owns the cell, if any. The states are
+            ``"look-<style>"`` (the cell this step looks at), ``"expanding"``,
+            ``"stack"``, ``"scan-path"`` (walked past by the scan to reach this
+            step), ``"problem"`` (in a rejected area), ``"outside"``, ``"area"``
+            (in an enclosed area), ``"wall"`` and ``"floor"``.
+        """
+        shown = self.owner.get(position)
+        if position == self.focus:
+            return f"look-{self.focus_style}", shown
+        if position == self.source:
+            return "expanding", shown
+        if position in stack_cells:
+            return "stack", shown
+        if position in self.scan_path:
+            return "scan-path", shown
+        if shown is not None:
+            if shown.problem:
+                return "problem", shown
+            return ("outside" if shown.outside else "area"), shown
+        if self.grid[position[0]][position[1]] in WALLS:
+            return "wall", None
+        return "floor", None
+
+    def _record_frame(self) -> None:
+        """Store the current state as a frame: the changed cells and the status lines."""
         stack = set(self.stack)
         marked = {cell for cell in (self.focus, self.source) if cell is not None}
         marked |= self.scan_path
@@ -150,9 +527,23 @@ class FrameRecorder(Visualiser):
             return len(STATES) + (shown.number - 1) % len(AREA_COLOURS)
         return STATE_CODES[state]
 
-    def hover_text(self, position: Position) -> str:
-        """Describe a cell for the page's hover box, e.g. "line 3, col 5: chair 'W'"."""
-        return f"{self._where(position)}: {self.describe(position)}"
+
+# Recording plans --------------------------------------------------------------
+
+
+def estimate_steps(grid: list[str]) -> int:
+    """Estimate the number of steps: roughly one pop and four checks per open cell."""
+    return 5 * sum(cell not in WALLS for line in grid for cell in line)
+
+
+def trace_plan(recorder: FrameRecorder, grid: list[str], labels: dict[Position, str]) -> None:
+    """Run the search on a parsed plan and send every event to the recorder.
+
+    This follows ``count_chairs``: find each area, then add it to the report.
+    """
+    for area in _find_areas(grid, labels, recorder.trace):
+        recorder.area_finished(area)
+    recorder.finish()
 
 
 def house_name(path: Path) -> str:
@@ -160,33 +551,22 @@ def house_name(path: Path) -> str:
     return path.stem.replace("_", " ")
 
 
-def write_html(
-    houses: Sequence[tuple[str, str]],
-    path: Path,
-    out: TextIO,
-    every: int | None = None,
-) -> int:
+def write_html(houses: Sequence[tuple[str, str]], path: Path, every: int | None = None) -> None:
     """Record the search for each house and write one page with all of them.
-
-    For each house, a summary of its areas and its report (or error) is written
-    to ``out``, the same as in the terminal view.
 
     Args:
         houses: ``(name, plan text)`` pairs, in the order the drop-down lists them.
+            A plan that breaks a rule still gets its animation, with the error
+            shown as its final report.
         path: The HTML file to write.
-        out: Where to write the summaries.
         every: Record a frame every this many steps. ``None`` records every
             step, unless that would be more than ``MAX_FRAMES`` frames.
 
-    Returns:
-        A process exit code: 1 if any plan is rejected, otherwise 0. A rejected
-        plan still gets its page, with the error shown as its final report.
-
     Raises:
         ValueError: If a plan cannot be parsed at all. The message names the house.
+        OSError: If the page cannot be written.
     """
     records = []
-    code = 0
     for name, plan in houses:
         try:
             grid, labels = _parse_plan(plan)
@@ -195,16 +575,9 @@ def write_html(
         pace = every or max(1, math.ceil(estimate_steps(grid) / MAX_FRAMES))
         recorder = FrameRecorder(plan, grid, pace)
         trace_plan(recorder, grid, labels)
-
-        out.write(f"== {name}\n")
-        code = max(code, write_result(recorder, out))
-        described = "every step" if pace == 1 else f"one every {pace} steps"
-        out.write(f"{len(recorder.statuses)} frames ({described}).\n\n")
         records.append(_house(name, recorder))
 
     path.write_text(_page(records), encoding="utf-8")
-    out.write(f"Wrote {path}\n")
-    return code
 
 
 def _house(name: str, recorder: FrameRecorder) -> dict:

@@ -26,7 +26,7 @@ Each cell is filled once, so for a plan of height `H` and width `W` the time and
 
 ## Watching the search
 
-The visualisers reuse these functions instead of copying them. `_find_areas` and `_walk_area` take an optional `trace` function, which does nothing when `count_chairs` runs. The visualiser passes its own `trace`, which receives one event per action (`scan`, `visit`, `check`, `label`, `chair`), and turns each event into a numbered step with an explanation. When an area is finished, it calls `_add_area` exactly as `count_chairs` does.
+`--animation` (see the README) writes a web page made by `chair_counter/plotly_html.py`. It reuses these functions instead of copying them. `_find_areas` and `_walk_area` take an optional `trace` function, which does nothing when `count_chairs` runs. `FrameRecorder` passes its own `trace`, which receives one event per action (`scan`, `visit`, `check`, `label`, `chair`), and turns each event into a numbered step with an explanation and a frame. When an area is finished, it calls `_add_area` exactly as `count_chairs` does.
 
 Colours in each frame:
 

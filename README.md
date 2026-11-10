@@ -16,40 +16,38 @@ W: 0, P: 2, S: 0, C: 0
 ...
 ```
 
+Everything beyond the printed report is optional:
+
 | Option | Effect |
 | --- | --- |
 | `--output DIR` | Also save the report as `DIR/<plan>_report.txt`, e.g. `output/rooms_report.txt`. |
-| `--animation` | With `--output`, also save an animation of the search as `DIR/<plan>_search.html`. |
+| `--animation` | With `--output`, also save a web page that animates the search (see below). |
+| `--every N` | With `--animation`, record one frame every `N` steps instead of every step, for a smaller page. |
 
-`--help` explains the plan format. Errors such as a missing file or an invalid plan print one line and exit with code 2. Run `python -m pip install .` to get a `chair-counter` command that does the same.
+`<plan>` is the plan's file name without `.txt`, so plans never overwrite each other's files.
+
+You can pass several plans, or a folder to use every `.txt` plan in it. Each report is then printed under a `== <file>` heading, and saved to its own file:
+
+```powershell
+python -m chair_counter inputs --output output --animation
+```
+
+`--help` explains the plan format. Errors such as a missing file, an invalid plan or a bad option combination print one line and exit with code 2, before any file is written. Run `python -m pip install .` to get a `chair-counter` command that does the same.
 
 ## Watch the search
 
-The visualiser shows each step of the search: every cell the scan passes, every cell popped from the stack, every neighbour check, and every chair or label recorded.
+`--animation` writes a web page that replays the search one step at a time: every cell the scan passes, every cell popped from the stack, every neighbour check, and every chair or label recorded. Each step comes with a sentence explaining it.
 
-In the terminal:
-
-```powershell
-python -m chair_counter.visualize inputs/rooms.txt
-```
-
-| Option | Effect |
+| Plans given | Page |
 | --- | --- |
-| `--step` | Pause after every frame. Enter continues, a number jumps that many steps, `c` runs to the end, `q` quits. |
-| `--every N` | Draw a frame every `N` steps. |
-| `--delay SECONDS` | Time per animated frame (default `0.03`). |
-| `--plain` | No colour. Print every step as a line of text. |
+| One | `DIR/<plan>_search.html` |
+| Several, or a folder | `DIR/search.html`, with a drop-down to pick the house |
 
-As a web page with a Play button, a slider and a house drop-down. Pass plan files, or a folder to include every `.txt` plan in it:
-
-```powershell
-python -m chair_counter.visualize inputs --html output/search.html
-```
-
-Every step of the search is a frame. The page fits the browser window and has these controls:
+The page fits the browser window and has these controls:
 
 - Play/Pause (Space), a speed setting in steps per second, and an option to pause whenever a new area starts.
 - ◀ ▶ (arrow keys) to move one step, and ⏮ Area / Area ⏭ (Page Up / Page Down) to jump to where an area starts.
+- A slider to jump to any step. Hover over a cell to see what it holds.
 
 It loads Plotly from the internet, so it needs a connection to open. [docs/solution.md](docs/solution.md#watching-the-search) explains the colours.
 
@@ -58,10 +56,9 @@ It loads Plotly from the internet, so it needs a connection to open. [docs/solut
 | Path | Contents |
 | --- | --- |
 | `chair_counter/floor_plan.py` | All counting logic. Start here. |
-| `chair_counter/cli.py` | The `python -m chair_counter` command. |
-| `chair_counter/visualize.py` | Step-by-step terminal view, built on the counting functions. |
-| `chair_counter/plotly_html.py` | The animated web page. |
+| `chair_counter/cli.py` | The `python -m chair_counter` command and its options. |
+| `chair_counter/plotly_html.py` | The animation page, built on the counting functions. |
 | `inputs/` | Sample plans: `rooms.txt` (supplied), `studio.txt`, `family_house.txt`, `bungalow.txt`. |
-| `output/` | A report for each sample plan and `search.html` with all of them, made with the commands above. |
+| `output/` | A report for each sample plan and `search.html` with all of them, made with the folder command above. |
 | `tests/` | Unit tests. Run them with `python -m unittest -v`. |
 | `docs/solution.md` | How the algorithm works and the input rules. |

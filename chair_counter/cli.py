@@ -1,14 +1,22 @@
-"""Command-line tool: read a floor plan file and print the chair report.
+"""Command-line tool: read floor plan files and print their chair reports.
 
 Run ``python -m chair_counter PLAN`` (or ``chair-counter PLAN`` after
-installing). The report goes to standard output. ``--output DIR`` also saves it
-to ``DIR/<plan>_report.txt``, and ``--animation`` adds an animated
-``DIR/<plan>_search.html``, where ``<plan>`` is the plan's file name without
-``.txt``. Different plans can therefore share one output folder.
+installing). The report goes to standard output, in the exact format the old
+system reads. A folder stands for every ``.txt`` plan in it.
+
+Everything else is optional and goes into the folder given by ``--output DIR``:
+
+- ``DIR/<plan>_report.txt``: the report of each plan.
+- With ``--animation``: a web page that animates the search, step by step.
+  One plan gives ``DIR/<plan>_search.html``; several give ``DIR/search.html``,
+  with a drop-down to pick the house. ``--every N`` records one frame every
+  ``N`` steps instead of every step, for a smaller page.
+
+``<plan>`` is the plan's file name without ``.txt``, so several plans can share
+one output folder.
 """
 
 import argparse
-import io
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -41,22 +49,61 @@ example:
     office:
     W: 1, P: 0, S: 0, C: 1
 
-  To also save output/rooms_report.txt, and an animation of the search in
-  output/rooms_search.html:
-    %(prog)s rooms.txt --output output --animation
+more examples:
+  %(prog)s rooms.txt --output output
+      also save output/rooms_report.txt
+  %(prog)s rooms.txt --output output --animation
+      also save an animation of the search as output/rooms_search.html
+  %(prog)s inputs --output output --animation
+      every plan in inputs/: one report each, and output/search.html
+      with a drop-down to pick the house
 """
 
 REPORT_SUFFIX = "_report.txt"
 ANIMATION_SUFFIX = "_search.html"
+COMBINED_ANIMATION = "search.html"
 
 
-def output_files(plan: Path, folder: Path) -> tuple[Path, Path]:
-    """Return the report and animation paths for a plan in an output folder.
+def collect_plans(paths: Sequence[Path]) -> list[Path]:
+    """Expand folders into the ``.txt`` plan files they contain.
 
-    The plan's file name without its extension comes first, so
-    ``inputs/rooms.txt`` gives ``rooms_report.txt`` and ``rooms_search.html``.
+    Args:
+        paths: Plan files and folders, as given on the command line.
+
+    Returns:
+        The plan files, in the order given. A folder's files are sorted by name.
+
+    Raises:
+        ValueError: If a folder contains no ``.txt`` files, or two plans have
+            the same file name, so their output files would overwrite each other.
     """
-    return folder / f"{plan.stem}{REPORT_SUFFIX}", folder / f"{plan.stem}{ANIMATION_SUFFIX}"
+    plans = []
+    for path in paths:
+        if path.is_dir():
+            found = sorted(path.glob("*.txt"))
+            if not found:
+                raise ValueError(f"No .txt floor plans in folder {path}.")
+            plans.extend(found)
+        else:
+            plans.append(path)
+
+    stems = [plan.stem for plan in plans]
+    for stem in stems:
+        if stems.count(stem) > 1:
+            raise ValueError(f"Two plans are named {stem!r}; their output files would clash.")
+    return plans
+
+
+def report_file(plan: Path, folder: Path) -> Path:
+    """Return where a plan's report is saved, e.g. ``inputs/rooms.txt`` -> ``folder/rooms_report.txt``."""
+    return folder / f"{plan.stem}{REPORT_SUFFIX}"
+
+
+def animation_file(plans: Sequence[Path], folder: Path) -> Path:
+    """Return where the animation is saved: ``<plan>_search.html``, or ``search.html`` for several plans."""
+    if len(plans) == 1:
+        return folder / f"{plans[0].stem}{ANIMATION_SUFFIX}"
+    return folder / COMBINED_ANIMATION
 
 
 def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
@@ -72,26 +119,43 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("plan", type=Path, help="path to the floor plan text file")
+    parser.add_argument(
+        "plans",
+        type=Path,
+        nargs="+",
+        metavar="plan",
+        help="a floor plan text file, or a folder of .txt plans; several may be given",
+    )
     parser.add_argument(
         "--output",
         type=Path,
         metavar="DIR",
-        help=f"also save the report to DIR/<plan>{REPORT_SUFFIX}, creating DIR if needed",
+        help=f"also save each report to DIR/<plan>{REPORT_SUFFIX}, creating DIR if needed",
     )
     parser.add_argument(
         "--animation",
         action="store_true",
-        help=f"with --output, also write an animation of the search to DIR/<plan>{ANIMATION_SUFFIX}",
+        help=(
+            f"with --output, also write a web page that animates the search: "
+            f"DIR/<plan>{ANIMATION_SUFFIX}, or DIR/{COMBINED_ANIMATION} for several plans"
+        ),
+    )
+    parser.add_argument(
+        "--every",
+        type=int,
+        metavar="N",
+        help="with --animation, record one frame every N steps (default: every step)",
     )
     return parser
 
 
 def main(argv: Sequence[str] | None = None, prog: str | None = None) -> None:
-    """Read a plan, print its report and save the requested files.
+    """Read the plans, print their reports and save the requested files.
 
-    Errors such as a missing file or an invalid plan are reported by argparse
-    as a one-line message, and the process exits with code 2.
+    Every plan is read and counted before anything is printed or saved, so an
+    invalid plan leaves no partial output. Errors such as a missing file or an
+    invalid plan are reported by argparse as a one-line message, and the
+    process exits with code 2.
 
     Args:
         argv: Command-line arguments without the program name. ``None`` reads
@@ -102,28 +166,46 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> None:
     args = parser.parse_args(argv)
     if args.animation and args.output is None:
         parser.error("--animation needs --output DIR to know where to write the page")
+    if args.every is not None and not args.animation:
+        parser.error("--every only applies with --animation")
+    if args.every is not None and args.every < 1:
+        parser.error("--every must be at least 1")
 
     try:
-        # utf-8-sig also accepts files that start with a byte order mark (BOM).
-        plan = args.plan.read_text(encoding="utf-8-sig")
-        report = count_chairs(plan)
-    except (OSError, ValueError) as error:  # ValueError includes bad encodings.
+        paths = collect_plans(args.plans)
+    except ValueError as error:
         parser.error(str(error))
 
-    text = format_report(report)
-    print(text)
+    results = []  # (path, plan text, report text) for each plan.
+    for path in paths:
+        try:
+            # utf-8-sig also accepts files that start with a byte order mark (BOM).
+            plan = path.read_text(encoding="utf-8-sig")
+            text = format_report(count_chairs(plan))
+        except OSError as error:  # The message already names the file.
+            parser.error(str(error))
+        except ValueError as error:  # An invalid plan, or not UTF-8 text.
+            parser.error(f"{path}: {error}")
+        results.append((path, plan, text))
+
+    for index, (path, _, text) in enumerate(results):
+        if len(results) > 1:  # Head each report with its file; one plan prints the report only.
+            if index:
+                print()
+            print(f"== {path}")
+        print(text)
 
     if args.output is None:
         return
-    report_path, animation_path = output_files(args.plan, args.output)
     try:
         args.output.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(text + "\n", encoding="utf-8")
+        for path, _, text in results:
+            report_file(path, args.output).write_text(text + "\n", encoding="utf-8")
         if args.animation:
-            # Imported here so the plain report never loads the visualisers.
+            # Imported here so a plain report never loads the animation code.
             from .plotly_html import house_name, write_html
 
-            houses = [(house_name(args.plan), plan)]
-            write_html(houses, animation_path, io.StringIO())
+            houses = [(house_name(path), plan) for path, plan, _ in results]
+            write_html(houses, animation_file(paths, args.output), every=args.every)
     except OSError as error:
         parser.error(str(error))
