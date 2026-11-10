@@ -10,7 +10,7 @@ from pathlib import Path
 
 from chair_counter import count_chairs, format_report
 from chair_counter.cli import collect_plans, main
-from chair_counter.floor_plan import _parse_plan
+from chair_counter.floor_plan import _find_areas, _parse_plan
 from chair_counter.plotly_html import FrameRecorder, trace_plan, write_html
 
 TWO_ROOMS = (
@@ -106,6 +106,29 @@ class AnimationTests(unittest.TestCase):
             recorder = CheckedRecorder(plan, grid)
             trace_plan(recorder, grid, labels)
             self.assertEqual(len(recorder.deltas), recorder.step_number)
+
+    def test_walls_change_colour_once_a_fill_finds_them(self) -> None:
+        """Walls start unfound, belong to the area that bumps into them, then stay found."""
+        grid, labels = _parse_plan(TWO_ROOMS)
+        recorder = FrameRecorder(TWO_ROOMS, grid)
+        walls = {(r, c) for r, line in enumerate(grid) for c, cell in enumerate(line) if cell in "+-|"}
+        states = []
+
+        def watch(event: str, position: tuple[int, int], **details: object) -> None:
+            if event == "scan" and details["result"] == "new area":
+                states.append({recorder.cell_state(wall, set())[0] for wall in walls})
+            recorder.trace(event, position, **details)
+
+        for area in _find_areas(grid, labels, watch):
+            recorder.area_finished(area)
+        recorder.finish()
+
+        self.assertEqual(states[0], {"wall"})  # Before the outside is filled.
+        self.assertIn("wall-found", states[1])  # The outer walls, found by the outside.
+        self.assertIn("wall", states[1])  # The middle wall is out of the outside's reach.
+        self.assertEqual({recorder.cell_state(wall, set())[0] for wall in walls}, {"wall-found"})
+        steps = "\n".join(status[1] for status in recorder.statuses)
+        self.assertIn("It is part of the boundary of area 1 (Studio).", steps)
 
     def test_several_houses_keep_each_result(self) -> None:
         """Put every house on one page, including the error for a rejected plan."""

@@ -66,7 +66,9 @@ STACK_SHOWN = 6
 
 STATES = (
     ("floor", "#ffffff", "not reached yet"),
-    ("wall", "#868e96", "wall"),
+    ("wall", "#ced4da", "wall, not found yet"),
+    ("wall-found", "#868e96", "wall found by an earlier area"),
+    ("wall-current", "#9775fa", "wall around the area being filled"),
     ("outside", "#dee2e6", "outside the building"),
     ("problem", "#e03131", "area rejected by _add_area"),
     ("stack", "#66d9e8", "waiting on the stack"),
@@ -151,8 +153,9 @@ class FrameRecorder:
       stack, the area being filled, and the report so far.
 
     When recording every step, only the cells that can have changed are
-    recomputed: the cells highlighted in this frame or the last one, and the
-    cells that joined or left the stack. Everything is recomputed for the first
+    recomputed: the cells highlighted in this frame or the last one, the cells
+    that joined or left the stack, and, when a new area starts, the walls around
+    the previous one. Everything is recomputed for the first
     frame, when frames skip steps, and when an area is rejected and turns red.
 
     Attributes:
@@ -208,6 +211,8 @@ class FrameRecorder:
         self.focus_style = ""  # How that look turned out, e.g. "wall" or "added".
         self.source: Position | None = None  # The cell being expanded.
         self.scan_path: set[Position] = set()  # Cells the scan just walked past.
+        self.found_walls: set[Position] = set()  # Walls any fill has bumped into.
+        self.current_walls: set[Position] = set()  # Walls around the area being filled.
 
         # Recorded frames.
         self.codes = [[STATE_CODES["floor"]] * self.width for _ in range(self.height)]
@@ -218,6 +223,7 @@ class FrameRecorder:
         self._last_marked: set[Position] = set()
         self._last_stack: set[Position] = set()
         self._last_problems = 0
+        self._last_walls = self.current_walls
 
     # Search events ----------------------------------------------------------
 
@@ -244,6 +250,7 @@ class FrameRecorder:
             self.current = ShownArea(len(self.shown), details["area"], position)
             self.shown.append(self.current)
             self.stack = [position]
+            self.current_walls = set()  # The last area's walls now count as found earlier.
             passed, path = self._scan_passed()
             self._step(
                 f"{passed}{self._where(position)} is open and in no area "
@@ -316,6 +323,7 @@ class FrameRecorder:
     def finish(self) -> None:
         """Add the last step, after the scan has passed the final cell."""
         self.current = None
+        self.current_walls = set()
         passed, path = self._scan_passed()
         self._step(
             f"{passed}The scan has reached the end of the grid, "
@@ -343,7 +351,12 @@ class FrameRecorder:
         if result == "visited":
             text = f"{where} was already reached, skip."
         elif result == "wall":
-            text = f"{where} is a wall {self.grid[position[0]][position[1]]!r}, blocked."
+            self.found_walls.add(position)
+            self.current_walls.add(position)
+            text = (
+                f"{where} is a wall {self.grid[position[0]][position[1]]!r}, blocked. "
+                f"It is part of the boundary of {self.current.name}."
+            )
         else:
             text = f"{where} is {self.describe(position)}, so mark it reached and push it."
         self._step(look + text, focus=position, style=result, source=source)
@@ -474,7 +487,9 @@ class FrameRecorder:
             ``"look-<style>"`` (the cell this step looks at), ``"expanding"``,
             ``"stack"``, ``"scan-path"`` (walked past by the scan to reach this
             step), ``"problem"`` (in a rejected area), ``"outside"``, ``"area"``
-            (in an enclosed area), ``"wall"`` and ``"floor"``.
+            (in an enclosed area), ``"wall-current"`` (a wall the area being
+            filled has bumped into), ``"wall-found"`` (a wall an earlier area
+            bumped into), ``"wall"`` (not found yet) and ``"floor"``.
         """
         shown = self.owner.get(position)
         if position == self.focus:
@@ -489,6 +504,10 @@ class FrameRecorder:
             if shown.problem:
                 return "problem", shown
             return ("outside" if shown.outside else "area"), shown
+        if position in self.current_walls:
+            return "wall-current", None
+        if position in self.found_walls:
+            return "wall-found", None
         if self.grid[position[0]][position[1]] in WALLS:
             return "wall", None
         return "floor", None
@@ -504,6 +523,8 @@ class FrameRecorder:
             candidates = [(row, column) for row in range(self.height) for column in range(self.width)]
         else:
             candidates = self._last_marked | marked | (stack ^ self._last_stack)
+            if self.current_walls is not self._last_walls:  # A new area has started,
+                candidates |= self._last_walls  # so the last area's walls change colour.
 
         changes = []
         for row, column in candidates:
@@ -519,6 +540,7 @@ class FrameRecorder:
         self.deltas.append(changes)
         self.statuses.append(self.status_lines())
         self._last_marked, self._last_stack, self._last_problems = marked, stack, problems
+        self._last_walls = self.current_walls
 
     @staticmethod
     def _code(state: str, shown: ShownArea | None) -> int:

@@ -10,8 +10,11 @@ The sample plans are in `inputs/` and the results go to `output/`. Run these fro
 # One plan: print its report and save it, with its animation.
 python -m chair_counter inputs/rooms.txt --output output --animation
 
-# Every plan in inputs/: a report for each, and one page with a house drop-down.
+# Every plan in inputs/: a report for each, and one page with a house type drop-down.
 python -m chair_counter inputs --output output --animation
+
+# Open the page in your default browser (on macOS use `open`, on Linux `xdg-open`).
+Start-Process output/search.html
 ```
 
 ```
@@ -24,7 +27,7 @@ inputs/                        output/
                                  search.html         (second command)
 ```
 
-Open the `.html` file in a browser to watch the search. Leave out `--animation` to save only the reports, or `--output output` as well to only print the report.
+Leave out `--animation` to save only the reports, or `--output output` as well to only print the report.
 
 ## Count chairs
 
