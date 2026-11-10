@@ -9,6 +9,19 @@ The floor plan is a grid. Each character occupies one cell, and the wall cells d
 3. **Find enclosed areas.** Scan the rest of the grid. Start a flood fill at each unvisited floor cell and collect the labels and chair markers in its connected area. Mark cells as visited when adding them to the search stack so each cell is processed once. Four-direction movement keeps the search from passing between consecutive diagonal wall cells.
 4. **Build the report.** Add the chairs from every enclosed area to the apartment total. Add a room subtotal when an area has a name. Print the total first, then the rooms alphabetically, with counts in `W`, `P`, `S`, `C` order and zeros included.
 
+In `chair_counter/floor_plan.py`, step 1 is `_parse_plan`. Steps 2 and 3 are `_find_areas`, which scans the grid and uses `_walk_area` for each flood fill. Step 4 is `_add_area`, which also applies the input rules. `count_chairs` calls these in order.
+
+## Watching the algorithm
+
+Run `python -m chair_counter.visualize PLAN` to see the steps above on a real plan. The visualiser has no counting logic of its own. It calls `_parse_plan`, `_find_areas`, and `_add_area`, then replays each area's cells in the order the flood fill reached them.
+
+- The first area is the exterior, which starts in the blank border and is drawn in dark grey.
+- Each enclosed area gets its own colour. The cells reached most recently are highlighted in yellow, so you can watch the fill spread and stop at walls.
+- An area that `_add_area` rejects is drawn in red, with the error message beside its summary. The visualiser keeps going to show the rest of the plan, then reports the first error, which is the one `count_chairs` raises.
+- Below the drawing, one line per finished area lists its label, cell count, and chairs. The final report comes from `format_report`.
+
+Add `--step` to pause after each area. The [README](../README.md#watch-the-algorithm) lists the other options.
+
 ## Input rules
 
 - The plan is UTF-8 text. Spaces preserve the layout, and rows can have different lengths.

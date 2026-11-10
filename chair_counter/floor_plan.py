@@ -2,7 +2,7 @@
 
 import re
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 CHAIR_TYPES = ("W", "P", "S", "C")
@@ -11,6 +11,11 @@ PLAN_CHARACTERS = WALLS.union(CHAIR_TYPES, " ")
 ROOM_LABEL = re.compile(r"\(([^()]*)\)")
 
 Position = tuple[int, int]
+Trace = Callable[..., None]
+
+
+def _no_trace(event: str, position: Position, **details: object) -> None:
+    """Ignore search events. Pass another function as trace to observe the search."""
 
 
 @dataclass
@@ -54,30 +59,116 @@ def _parse_plan(plan: str) -> tuple[list[str], dict[Position, str]]:
 
 
 def _walk_area(
-    grid: list[str], start: Position, visited: set[Position]
+    grid: list[str],
+    start: Position,
+    visited: set[Position],
+    trace: Trace = _no_trace,
 ) -> Iterator[Position]:
-    """Yield each cell reachable from start by moving along rows and columns."""
+    """Yield each cell reachable from start by moving along rows and columns.
+
+    trace receives a "visit" event for each cell taken from the stack and a
+    "check" event for each of its neighbours, with the result of the check.
+    """
     height, width = len(grid), len(grid[0])
     pending = [start]
     visited.add(start)
 
     while pending:
         row, column = pending.pop()
+        trace("visit", (row, column), stack=pending)
         yield row, column
 
-        for next_row, next_column in (
+        for neighbour in (
             (row - 1, column),
             (row + 1, column),
             (row, column - 1),
             (row, column + 1),
         ):
+            next_row, next_column = neighbour
             if not (0 <= next_row < height and 0 <= next_column < width):
+                result = "off grid"
+            elif neighbour in visited:
+                result = "visited"
+            elif grid[next_row][next_column] in WALLS:
+                result = "wall"
+            else:
+                visited.add(neighbour)
+                pending.append(neighbour)
+                result = "added"
+            trace("check", neighbour, source=(row, column), result=result)
+
+
+@dataclass
+class Area:
+    """One connected area: its cells in search order, chairs and room labels."""
+
+    cells: list[Position]
+    chairs: Counter[str]
+    names: list[str]
+
+    @property
+    def is_exterior(self) -> bool:
+        """The scan starts in the padded border, so that area is the outside."""
+        return self.cells[0] == (0, 0)
+
+
+def _find_areas(
+    grid: list[str], labels: dict[Position, str], trace: Trace = _no_trace
+) -> Iterator[Area]:
+    """Scan the grid row by row and yield each connected area once.
+
+    trace receives a "scan" event for each cell the scan looks at, "label" and
+    "chair" events when an area records one, and the events of _walk_area.
+    """
+    visited: set[Position] = set()
+
+    for row, line in enumerate(grid):
+        for column, cell in enumerate(line):
+            start = (row, column)
+            if cell in WALLS:
+                trace("scan", start, result="wall")
                 continue
-            neighbour = (next_row, next_column)
-            if neighbour in visited or grid[next_row][next_column] in WALLS:
+            if start in visited:
+                trace("scan", start, result="visited")
                 continue
-            visited.add(neighbour)
-            pending.append(neighbour)
+
+            area = Area(cells=[], chairs=Counter(), names=[])
+            trace("scan", start, result="new area", area=area)
+            for position in _walk_area(grid, start, visited, trace):
+                area.cells.append(position)
+                name = labels.get(position)
+                if name is not None:
+                    area.names.append(name)
+                    trace("label", position, name=name, area=area)
+                marker = grid[position[0]][position[1]]
+                if marker in CHAIR_TYPES:
+                    area.chairs[marker] += 1
+                    trace("chair", position, chair=marker, area=area)
+            yield area
+
+
+def _add_area(report: ChairReport, area: Area) -> None:
+    """Add an area's chairs to the report, or raise ValueError if it breaks a rule.
+
+    The report is left unchanged when the area is rejected.
+    """
+    if area.is_exterior:
+        if area.names or area.chairs:
+            raise ValueError(
+                "A room label or chair is connected to the exterior. "
+                "Check the outer walls for gaps."
+            )
+        return
+
+    if len(area.names) > 1:
+        names = ", ".join(area.names)
+        raise ValueError(f"One connected area has multiple room labels: {names}.")
+    if area.names:
+        name = area.names[0]
+        if name in report.rooms:
+            raise ValueError(f"Duplicate room label {name!r}.")
+        report.rooms[name] = area.chairs
+    report.total.update(area.chairs)
 
 
 def count_chairs(plan: str) -> ChairReport:
@@ -88,43 +179,9 @@ def count_chairs(plan: str) -> ChairReport:
     conflicting room labels, or chairs and labels connected to the exterior.
     """
     grid, labels = _parse_plan(plan)
-    visited: set[Position] = set()
     report = ChairReport(total=Counter(), rooms={})
-
-    for row, line in enumerate(grid):
-        for column, cell in enumerate(line):
-            start = (row, column)
-            if cell in WALLS or start in visited:
-                continue
-
-            area_chairs: Counter[str] = Counter()
-            area_names: list[str] = []
-            for area_row, area_column in _walk_area(grid, start, visited):
-                name = labels.get((area_row, area_column))
-                if name is not None:
-                    area_names.append(name)
-                marker = grid[area_row][area_column]
-                if marker in CHAIR_TYPES:
-                    area_chairs[marker] += 1
-
-            if start == (0, 0):
-                if area_names or area_chairs:
-                    raise ValueError(
-                        "A room label or chair is connected to the exterior. "
-                        "Check the outer walls for gaps."
-                    )
-                continue
-
-            if len(area_names) > 1:
-                names = ", ".join(area_names)
-                raise ValueError(f"One connected area has multiple room labels: {names}.")
-            if area_names:
-                name = area_names[0]
-                if name in report.rooms:
-                    raise ValueError(f"Duplicate room label {name!r}.")
-                report.rooms[name] = area_chairs
-            report.total.update(area_chairs)
-
+    for area in _find_areas(grid, labels):
+        _add_area(report, area)
     return report
 
 
