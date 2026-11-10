@@ -34,7 +34,7 @@ def record(houses: list[tuple[str, str]], every: int | None = None) -> list[dict
         path = Path(folder) / "search.html"
         write_html(houses, path, every=every)
         page = path.read_text(encoding="utf-8")
-    assert '<button id="play"' in page
+    assert '<button id="play"' in page and 'id="report-title">Report so far<' in page
     return houses_in(page)
 
 
@@ -134,6 +134,26 @@ class AnimationTests(unittest.TestCase):
         self.assertEqual({recorder.cell_state(wall, set())[0] for wall in walls}, {"wall-found"})
         steps = "\n".join(status[1] for status in recorder.statuses)
         self.assertIn("It is part of the boundary of area 1 (Studio).", steps)
+
+    def test_report_panel_counts_up_as_the_frames_play(self) -> None:
+        """Start from zero counts, change only as areas are added, and end on the final report."""
+        house = record([("two rooms", TWO_ROOMS)])[0]
+        frames = [frame for frame, _ in house["reports"]]
+
+        self.assertEqual(frames[0], 0)
+        self.assertEqual(frames, sorted(set(frames)))
+        self.assertEqual(house["reports"][0][1].splitlines()[1], "W: 0, P: 0, S: 0, C: 0")
+        self.assertEqual(house["reports"][-1][1], house["result"])
+        self.assertGreater(len(frames), 2)
+
+    def test_last_frame_has_no_scan_path(self) -> None:
+        """End on a clean picture of the result, not the cells the scan walked past."""
+        grid, labels = _parse_plan(TWO_ROOMS)
+        recorder = FrameRecorder(TWO_ROOMS, grid)
+        trace_plan(recorder, grid, labels)
+
+        self.assertEqual(recorder.scan_path, set())
+        self.assertIn("The scan has reached the end of the grid", recorder.statuses[-1][1])
 
     def test_several_houses_keep_each_result(self) -> None:
         """Put every house on one page, including the error for a rejected plan."""

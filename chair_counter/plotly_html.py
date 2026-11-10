@@ -172,6 +172,8 @@ class FrameRecorder:
         deltas: For each frame, the changed cells as ``[index, code, ...]``,
             where ``index`` is ``row * width + column``.
         statuses: For each frame, the status lines from ``status_lines``.
+        reports: The report so far, as ``(frame, text)`` each time it changes,
+            so the page can count up as the animation plays.
         area_starts: Frame numbers where the scan starts a new area.
     """
 
@@ -224,6 +226,7 @@ class FrameRecorder:
         self._last_stack: set[Position] = set()
         self._last_problems = 0
         self._last_walls = self.current_walls
+        self.reports: list[tuple[int, str]] = []  # (first frame, report text) at each change.
 
     # Search events ----------------------------------------------------------
 
@@ -324,11 +327,11 @@ class FrameRecorder:
         """Add the last step, after the scan has passed the final cell."""
         self.current = None
         self.current_walls = set()
-        passed, path = self._scan_passed()
+        passed, _ = self._scan_passed()
+        # No scan path on the last frame, so it shows the finished result cleanly.
         self._step(
             f"{passed}The scan has reached the end of the grid, "
             "so every open cell belongs to an area.",
-            scan_path=path,
             force=True,
         )
 
@@ -537,6 +540,9 @@ class FrameRecorder:
             self.keyframes.append(
                 "".join(chr(FIRST_CODE_CHAR + code) for line in self.codes for code in line)
             )
+        report = format_report(self.report)
+        if not self.reports or self.reports[-1][1] != report:
+            self.reports.append((len(self.statuses), report))
         self.deltas.append(changes)
         self.statuses.append(self.status_lines())
         self._last_marked, self._last_stack, self._last_problems = marked, stack, problems
@@ -607,8 +613,9 @@ def _house(name: str, recorder: FrameRecorder) -> dict:
 
     Returns:
         The house's ``name``, grid size, recorded frames (``keyframes``,
-        ``deltas``, ``statuses``), ``areaStarts``, the Plotly ``trace`` and
-        ``layout``, and the ``result`` text: the final report, or the reason
+        ``deltas``, ``statuses``), ``areaStarts``, the ``reports`` so far,
+        the Plotly ``trace`` and ``layout``, and the ``result`` text, shown on
+        the last frame: the final report, or the reason
         the plan was rejected.
     """
     if recorder.first_error is not None:
@@ -625,6 +632,7 @@ def _house(name: str, recorder: FrameRecorder) -> dict:
         "deltas": recorder.deltas,
         "statuses": recorder.statuses,
         "areaStarts": recorder.area_starts,
+        "reports": recorder.reports,
         "trace": trace,
         "layout": layout,
         "result": result,
@@ -808,7 +816,7 @@ PAGE = Template("""<!doctype html>
 $legend
     </ul>
     <section class="report panel">
-      <h2>Final report</h2>
+      <h2 id="report-title">Report so far</h2>
       <pre id="result"></pre>
     </section>
   </aside>
@@ -863,7 +871,20 @@ function draw() {
 }
 
 // Show frame `index` in the status panel, slider and step counter.
+// The report as it stands at frame `index`; the final report on the last frame.
+function showReport(index) {
+  const done = index === lastFrame();
+  let text = "";
+  for (const [frame, report] of house.reports) {
+    if (frame > index) break;
+    text = report;
+  }
+  document.getElementById("report-title").textContent = done ? "Final report" : "Report so far";
+  document.getElementById("result").textContent = done ? house.result : text;
+}
+
 function show(index) {
+  showReport(index);
   current = index;
   slider.value = String(index);
   const lines = house.statuses[index];
@@ -932,7 +953,6 @@ function load(index, frame = 0) {
   house = HOUSES[index];
   picker.value = String(index);
   slider.max = String(lastFrame());
-  document.getElementById("result").textContent = house.result;
   rebuild(0);
   current = 0;
   Plotly.purge(chart);
