@@ -58,7 +58,11 @@ class AnimationTests(unittest.TestCase):
             "border cell (0, 0) is open and in no area yet, "
             "so start the outside here and push it onto the stack.",
         )
-        self.assertIn("Look below border cell (0, 1): line 1, col 1 is a wall '+', blocked.", steps)
+        self.assertIn(
+            "Look below border cell (0, 1): line 1, col 1 is a wall '+', blocked. "
+            "It is part of the boundary of the outside.",
+            steps,
+        )
         self.assertTrue(any(s.startswith("The label (Studio) starts at line 2, col 2") for s in steps))
         self.assertTrue(any("line 3, col 3 holds chair W. Area 1 (Studio) now has W: 1" in s for s in steps))
         self.assertTrue(any("_add_area records room 'Studio' with W: 1, P: 0, S: 0, C: 0" in s for s in steps))
@@ -115,9 +119,9 @@ class AnimationTests(unittest.TestCase):
         states = []
 
         def watch(event: str, position: tuple[int, int], **details: object) -> None:
+            recorder.trace(event, position, **details)
             if event == "scan" and details["result"] == "new area":
                 states.append({recorder.cell_state(wall, set())[0] for wall in walls})
-            recorder.trace(event, position, **details)
 
         for area in _find_areas(grid, labels, watch):
             recorder.area_finished(area)
