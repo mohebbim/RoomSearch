@@ -1,0 +1,10 @@
+total:
+W: 3, P: 1, S: 3, C: 1
+bedroom:
+W: 1, P: 0, S: 1, C: 0
+den:
+W: 0, P: 1, S: 0, C: 0
+guest:
+W: 0, P: 0, S: 0, C: 0
+lounge:
+W: 2, P: 0, S: 2, C: 1

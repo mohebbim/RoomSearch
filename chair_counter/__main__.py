@@ -1,4 +1,4 @@
-"""Run the chair counter as a Python module."""
+"""Entry point for ``python -m chair_counter``. See ``cli.py`` for the options."""
 
 from .cli import main
 

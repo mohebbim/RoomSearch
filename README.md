@@ -1,44 +1,67 @@
 # ASCII floor plan chair counter
 
-Count chairs across an apartment and in each named room. The tool requires Python 3.10 or later and uses the standard library at runtime.
+Counts the chairs in an ASCII floor plan, for the whole apartment and for each room, and prints them in the exact text format the old system reads. Requires Python 3.10 or later. It uses only the standard library.
 
-## Run
-
-From the repository root, pass the path to an extracted floor plan.
+## Count chairs
 
 ```powershell
-python -m chair_counter "C:/path/to/rooms.txt"
+python -m chair_counter inputs/rooms.txt
 ```
 
-For the `chair-counter` command, install the package with `python -m pip install .`.
-
-## Watch the algorithm
-
-The visualiser draws the plan in the terminal and animates how the counter fills each area, then prints the same report. Run it from the repository root, or from anywhere after installing the package.
-
-```powershell
-python -m chair_counter.visualize "C:/path/to/rooms.txt"
 ```
-
-Use a real terminal, such as the VS Code integrated terminal, for the coloured animation. When the output is piped or redirected, the visualiser prints plain frames instead.
+total:
+W: 14, P: 7, S: 3, C: 1
+balcony:
+W: 0, P: 2, S: 0, C: 0
+...
+```
 
 | Option | Effect |
 | --- | --- |
-| `--step` | Pause after each area. Press Enter to continue. |
-| `--delay SECONDS` | Time per frame. The default is `0.03`. |
-| `--cells-per-frame N` | Cells filled between frames. Use `1` to watch every step. |
-| `--plain` | Print one frame per area without colour, marking the current area with dots. |
+| `--output DIR` | Also save the report as `DIR/<plan>_report.txt`, e.g. `output/rooms_report.txt`. |
+| `--animation` | With `--output`, also save an animation of the search as `DIR/<plan>_search.html`. |
 
-Press Ctrl+C to stop. The command exits with code 1 when the plan is rejected and 2 when the file cannot be read or parsed. The [solution write-up](docs/solution.md#watching-the-algorithm) explains what the colours mean.
+`--help` explains the plan format. Errors such as a missing file or an invalid plan print one line and exit with code 2. Run `python -m pip install .` to get a `chair-counter` command that does the same.
 
-## Test
+## Watch the search
+
+The visualiser shows each step of the search: every cell the scan passes, every cell popped from the stack, every neighbour check, and every chair or label recorded.
+
+In the terminal:
 
 ```powershell
-python -m unittest -v
+python -m chair_counter.visualize inputs/rooms.txt
 ```
+
+| Option | Effect |
+| --- | --- |
+| `--step` | Pause after every frame. Enter continues, a number jumps that many steps, `c` runs to the end, `q` quits. |
+| `--every N` | Draw a frame every `N` steps. |
+| `--delay SECONDS` | Time per animated frame (default `0.03`). |
+| `--plain` | No colour. Print every step as a line of text. |
+
+As a web page with a Play button, a slider and a house drop-down. Pass plan files, or a folder to include every `.txt` plan in it:
+
+```powershell
+python -m chair_counter.visualize inputs --html output/search.html
+```
+
+Every step of the search is a frame. The page fits the browser window and has these controls:
+
+- Play/Pause (Space), a speed setting in steps per second, and an option to pause whenever a new area starts.
+- ◀ ▶ (arrow keys) to move one step, and ⏮ Area / Area ⏭ (Page Up / Page Down) to jump to where an area starts.
+
+It loads Plotly from the internet, so it needs a connection to open. [docs/solution.md](docs/solution.md#watching-the-search) explains the colours.
 
 ## Project layout
 
-- `chair_counter/` contains the parser, connected-area search, output formatter, command-line interface, and visualiser (`visualize.py`).
-- `tests/` checks diagonal walls, indented rooms, unnamed areas, empty rooms, ambiguous labels, invalid input, and the visualiser output.
-- [Solution write-up](docs/solution.md) explains the algorithm, input rules, and how to extend it.
+| Path | Contents |
+| --- | --- |
+| `chair_counter/floor_plan.py` | All counting logic. Start here. |
+| `chair_counter/cli.py` | The `python -m chair_counter` command. |
+| `chair_counter/visualize.py` | Step-by-step terminal view, built on the counting functions. |
+| `chair_counter/plotly_html.py` | The animated web page. |
+| `inputs/` | Sample plans: `rooms.txt` (supplied), `studio.txt`, `family_house.txt`, `bungalow.txt`. |
+| `output/` | A report for each sample plan and `search.html` with all of them, made with the commands above. |
+| `tests/` | Unit tests. Run them with `python -m unittest -v`. |
+| `docs/solution.md` | How the algorithm works and the input rules. |
