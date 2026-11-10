@@ -2,6 +2,30 @@
 
 Counts the chairs in an ASCII floor plan, for the whole apartment and for each room, and prints them in the exact text format the old system reads. Requires Python 3.10 or later. It uses only the standard library.
 
+## Example with this repository
+
+The sample plans are in `inputs/` and the results go to `output/`. Run these from the repository folder:
+
+```powershell
+# One plan: print its report and save it, with its animation.
+python -m chair_counter inputs/rooms.txt --output output --animation
+
+# Every plan in inputs/: a report for each, and one page with a house drop-down.
+python -m chair_counter inputs --output output --animation
+```
+
+```
+inputs/                        output/
+  rooms.txt          ──►         rooms_report.txt
+  studio.txt                     studio_report.txt
+  family_house.txt               family_house_report.txt
+  bungalow.txt                   bungalow_report.txt
+                                 rooms_search.html   (first command)
+                                 search.html         (second command)
+```
+
+Open the `.html` file in a browser to watch the search. Leave out `--animation` to save only the reports, or `--output output` as well to only print the report.
+
 ## Count chairs
 
 ```powershell
