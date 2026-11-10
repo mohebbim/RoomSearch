@@ -14,7 +14,10 @@ How the pieces fit together:
 - ``FrameRecorder`` turns the events into steps. It keeps what is needed to
   draw them (the stack, which area owns each cell, the report so far) and
   records the colour of every cell after each step.
-- ``write_html`` records every plan and writes one page with all of them.
+- ``trace_plan`` and ``trace_room_seeded`` run the two counting approaches
+  (see ``APPROACHES``) with the recorder attached.
+- ``write_html`` records every plan with every approach and writes one page,
+  with drop-downs to pick the house and the approach.
 - ``PAGE`` is the page: Plotly draws the grid as a heatmap, and a small script
   plays the frames. It loads Plotly.js from its CDN, so opening it needs
   internet.
@@ -32,7 +35,7 @@ are stored compactly:
 import json
 import math
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from string import Template
@@ -49,6 +52,7 @@ from .floor_plan import (
     _parse_plan,
     format_report,
 )
+from .room_seeded import count_parsed_room_seeded
 
 PLOTLY_URL = "https://cdn.plot.ly/plotly-2.35.2.min.js"
 
@@ -61,6 +65,14 @@ KEYFRAME_EVERY = 200
 DIRECTIONS = {(-1, 0): "above", (1, 0): "below", (0, -1): "left of", (0, 1): "right of"}
 """Words for the four neighbour offsets, in the order ``_walk_area`` checks them."""
 
+SKIPPED = {
+    "wall": "walls",
+    "visited": "already in an area",
+    "outside": "outside",
+    "floor": "floor without a chair",
+}
+"""How step text names each kind of cell a scan passes without acting on it."""
+
 STACK_SHOWN = 6
 """How many stack entries the status panel lists before saying "and N more"."""
 
@@ -70,11 +82,13 @@ STATES = (
     ("wall-found", "#868e96", "wall detected earlier"),
     ("wall-current", "#9775fa", "wall detected"),
     ("outside", "#dee2e6", "outside the building"),
-    ("problem", "#e03131", "area rejected by _add_area"),
+    ("problem", "#e03131", "area that breaks a rule"),
     ("stack", "#66d9e8", "waiting on the stack"),
     ("expanding", "#f06595", "cell being expanded"),
     ("look-scan", "#f59f00", "scan starts a new area here"),
     ("scan-path", "#ffec99", "cells the scan walked past"),
+    ("inside-swept", "#e9e4d8", "inside, swept by the total scan, no room yet"),
+    ("chair-total", "#d9a400", "chair added to the total, no room yet"),
     ("look-added", "#40c057", "neighbour pushed onto the stack"),
     ("look-wall", "#fa5252", "neighbour is a wall"),
     ("look-visited", "#4dabf7", "neighbour already reached"),
@@ -172,6 +186,8 @@ class FrameRecorder:
         deltas: For each frame, the changed cells as ``[index, code, ...]``,
             where ``index`` is ``row * width + column``.
         statuses: For each frame, the status lines from ``status_lines``.
+        reports: The report so far, as ``(frame, text)`` each time it changes,
+            so the page can count up as the animation plays.
         area_starts: Frame numbers where the scan starts a new area.
     """
 
@@ -213,6 +229,8 @@ class FrameRecorder:
         self.scan_path: set[Position] = set()  # Cells the scan just walked past.
         self.found_walls: set[Position] = set()  # Walls any fill has bumped into.
         self.current_walls: set[Position] = set()  # Walls around the area being filled.
+        self.swept: set[Position] = set()  # Inside cells the room-seeded total scan passed,
+        self.total_chairs: set[Position] = set()  # and the chairs it added to the total.
 
         # Recorded frames.
         self.codes = [[STATE_CODES["floor"]] * self.width for _ in range(self.height)]
@@ -224,6 +242,7 @@ class FrameRecorder:
         self._last_stack: set[Position] = set()
         self._last_problems = 0
         self._last_walls = self.current_walls
+        self.reports: list[tuple[int, str]] = []  # (first frame, report text) at each change.
 
     # Search events ----------------------------------------------------------
 
@@ -243,21 +262,66 @@ class FrameRecorder:
         """
         if event == "scan":
             if details["result"] != "new area":
-                self.skipped[details["result"]] += 1
-                self.skipped_cells.append(position)
+                self._skip(position, details["result"])
                 return
-            self.area_starts.append(len(self.statuses))  # The frame about to be recorded.
-            self.current = ShownArea(len(self.shown), details["area"], position)
-            self.shown.append(self.current)
-            self.stack = [position]
-            self.current_walls = set()  # The last area's walls now count as found earlier.
-            passed, path = self._scan_passed()
+            self._start_area(
+                details["area"],
+                position,
+                lambda name: f"{self._where(position)} is open and in no area yet, "
+                f"so start {name} here and push it onto the stack.",
+            )
+        elif event == "seed":  # The room-seeded approach starts a fill.
+            self.report = details.get("report", self.report)  # Show its live report.
+            if details["role"] == "exterior":
+                text = (
+                    f"Start the exterior fill at {self._where(position)}, the corner of "
+                    "the blank border, which is always outside, and push it onto the stack."
+                )
+            else:
+                text = (
+                    f"Start a flood fill from the label ({details['name']}) at "
+                    f"{self._where(position)}, and push it onto the stack."
+                )
+            self._start_area(details["area"], position, lambda name: text)
+        elif event == "exterior":
             self._step(
-                f"{passed}{self._where(position)} is open and in no area "
-                f"yet, so start {self.current.name} here and push it onto the stack.",
-                focus=position,
-                style="scan",
-                scan_path=path,
+                "The stack is empty, so the outside is complete with "
+                f"{len(details['area'].cells)} cells. It holds no chair or label, so the "
+                "outer walls are closed. Next, scan every cell for chairs that are not outside.",
+                force=True,
+            )
+        elif event == "total":
+            if self.current is not None:  # The exterior fill is over.
+                self.current = None
+                self.current_walls = set()
+            result = details["result"]
+            if result in ("floor", "chair"):
+                self.swept.add(position)  # Stays marked until a room fill claims it.
+            if result == "chair":
+                self.total_chairs.add(position)
+                passed, path = self._scan_passed()
+                self._step(
+                    f"{passed}{self._where(position)} holds chair {details['chair']} and is not "
+                    f"outside, so add it to the apartment total: {counts_text(details['total'])}.",
+                    focus=position,
+                    style="record",
+                    scan_path=path,
+                )
+                return
+            self._skip(position, result)
+            if position[1] == self.width - 1:  # One step per row, so the sweep is visible.
+                passed, path = self._scan_passed()
+                self._step(
+                    f"{passed}Row {position[0]} is done. "
+                    f"Apartment total so far: {counts_text(details['total'])}.",
+                    scan_path=path,
+                )
+        elif event == "room":
+            area = details["area"]
+            self._step(
+                f"The stack is empty, so room {details['name']!r} is complete with "
+                f"{len(area.cells)} cells. _add_room stores its subtotal: "
+                f"{counts_text(area.chairs)}.",
                 force=True,
             )
         elif event == "visit":
@@ -320,17 +384,60 @@ class FrameRecorder:
                 )
         self._step(text, force=True)
 
-    def finish(self) -> None:
-        """Add the last step, after the scan has passed the final cell."""
+    def rejected(self, error: ValueError) -> None:
+        """Show the error that stopped the search, marking the area being filled red.
+
+        The connected-areas recording carries on past a rejected area (see
+        ``area_finished``), but the room-seeded search stops at its first error,
+        so its animation stops there too.
+        """
+        if self.current is not None:
+            self.current.problem = str(error)
+        if self.first_error is None:
+            self.first_error = str(error)
+        self._step(f"The search stops here and rejects the plan: {error}", force=True)
+
+    def finish(
+        self,
+        text: str = "The scan has reached the end of the grid, so every open cell belongs to an area.",
+    ) -> None:
+        """Add the last step, after the search has finished.
+
+        Args:
+            text: What the final step says, after any cells the scan passed.
+        """
         self.current = None
         self.current_walls = set()
+        passed, _ = self._scan_passed()
+        # No scan path on the last frame, so it shows the finished result cleanly.
+        self._step(f"{passed}{text}", force=True)
+
+    def _start_area(self, area: Area, position: Position, explain: Callable[[str], str]) -> None:
+        """Start showing a new area, with a frame that is never skipped.
+
+        Args:
+            area: The empty area the search is about to fill.
+            position: The cell the fill starts from.
+            explain: Builds the step text from the area's display name.
+        """
+        self.area_starts.append(len(self.statuses))  # The frame about to be recorded.
+        self.current = ShownArea(len(self.shown), area, position)
+        self.shown.append(self.current)
+        self.stack = [position]
+        self.current_walls = set()  # The last area's walls now count as found earlier.
         passed, path = self._scan_passed()
         self._step(
-            f"{passed}The scan has reached the end of the grid, "
-            "so every open cell belongs to an area.",
+            passed + explain(self.current.name),
+            focus=position,
+            style="scan",
             scan_path=path,
             force=True,
         )
+
+    def _skip(self, position: Position, kind: str) -> None:
+        """Note a cell a scan passed without acting on it. The next step reports these."""
+        self.skipped[kind] += 1
+        self.skipped_cells.append(position)
 
     # Step text --------------------------------------------------------------
 
@@ -372,13 +479,11 @@ class FrameRecorder:
         path, self.skipped_cells = self.skipped_cells, []
         if not self.skipped:
             return "", path
-        walls, visited = self.skipped["wall"], self.skipped["visited"]
-        self.skipped.clear()
-        text = (
-            f"The scan moves past {walls + visited} cells "
-            f"({walls} walls, {visited} already in an area). "
+        kinds = ", ".join(
+            f"{self.skipped[kind]} {words}" for kind, words in SKIPPED.items() if self.skipped[kind]
         )
-        return text, path
+        self.skipped.clear()
+        return f"The scan moves past {len(path)} cells ({kinds}). ", path
 
     def _is_border(self, position: Position) -> bool:
         """Whether a cell is in the blank border that ``_parse_plan`` adds."""
@@ -487,7 +592,9 @@ class FrameRecorder:
             ``"look-<style>"`` (the cell this step looks at), ``"expanding"``,
             ``"stack"``, ``"scan-path"`` (walked past by the scan to reach this
             step), ``"problem"`` (in a rejected area), ``"outside"``, ``"area"``
-            (in an enclosed area), ``"wall-current"`` (a wall the area being
+            (in an enclosed area), ``"chair-total"`` and ``"inside-swept"`` (a
+            chair or cell the room-seeded total scan passed that no room fill
+            has claimed), ``"wall-current"`` (a wall the area being
             filled has bumped into), ``"wall-found"`` (a wall an earlier area
             bumped into), ``"wall"`` (not found yet) and ``"floor"``.
         """
@@ -504,6 +611,10 @@ class FrameRecorder:
             if shown.problem:
                 return "problem", shown
             return ("outside" if shown.outside else "area"), shown
+        if position in self.total_chairs:
+            return "chair-total", None
+        if position in self.swept:
+            return "inside-swept", None
         if position in self.current_walls:
             return "wall-current", None
         if position in self.found_walls:
@@ -537,6 +648,9 @@ class FrameRecorder:
             self.keyframes.append(
                 "".join(chr(FIRST_CODE_CHAR + code) for line in self.codes for code in line)
             )
+        report = format_report(self.report)
+        if not self.reports or self.reports[-1][1] != report:
+            self.reports.append((len(self.statuses), report))
         self.deltas.append(changes)
         self.statuses.append(self.status_lines())
         self._last_marked, self._last_stack, self._last_problems = marked, stack, problems
@@ -559,7 +673,7 @@ def estimate_steps(grid: list[str]) -> int:
 
 
 def trace_plan(recorder: FrameRecorder, grid: list[str], labels: dict[Position, str]) -> None:
-    """Run the search on a parsed plan and send every event to the recorder.
+    """Run the connected-areas search on a parsed plan, sending every event to the recorder.
 
     This follows ``count_chairs``: find each area, then add it to the report.
     """
@@ -568,13 +682,68 @@ def trace_plan(recorder: FrameRecorder, grid: list[str], labels: dict[Position, 
     recorder.finish()
 
 
+def trace_room_seeded(recorder: FrameRecorder, grid: list[str], labels: dict[Position, str]) -> None:
+    """Run the room-seeded search on a parsed plan, sending every event to the recorder.
+
+    This calls ``room_seeded.count_parsed_room_seeded`` itself, so the search
+    shown is the real one. It stops at the first rule violation, as it does
+    when counting.
+    """
+    try:
+        count_parsed_room_seeded(grid, labels, recorder.trace)
+    except ValueError as error:
+        recorder.rejected(error)
+    recorder.finish("Every room label has been filled, so the report is complete.")
+
+
+@dataclass(frozen=True)
+class Approach:
+    """A counting approach the page can animate.
+
+    Attributes:
+        label: The name shown in the page's approach drop-down.
+        about: One sentence on how the approach searches, shown on the page.
+        function: The counting function, named when a plan is rejected.
+        run: Runs the search on a parsed plan, sending events to a recorder.
+    """
+
+    label: str
+    about: str
+    function: str
+    run: Callable[[FrameRecorder, list[str], dict[Position, str]], None]
+
+
+APPROACHES = {
+    "connected-areas": Approach(
+        "Connected areas",
+        "Scan every cell. Each open cell that is in no area yet starts a flood fill, "
+        "and each finished area is then checked and named by its label.",
+        "count_chairs",
+        trace_plan,
+    ),
+    "room-seeded": Approach(
+        "Room seeded",
+        "Fill the exterior from the border corner, scan for chairs that are not "
+        "outside to get the total, then flood-fill from each room label.",
+        "count_chairs_room_seeded",
+        trace_room_seeded,
+    ),
+}
+"""Every approach the page can animate, in the order of its drop-down. Keys match ``--approach``."""
+
+
 def house_name(path: Path) -> str:
     """Name a house after its plan file, e.g. ``family_house.txt`` -> "family house"."""
     return path.stem.replace("_", " ")
 
 
-def write_html(houses: Sequence[tuple[str, str]], path: Path, every: int | None = None) -> None:
-    """Record the search for each house and write one page with all of them.
+def write_html(
+    houses: Sequence[tuple[str, str]],
+    path: Path,
+    every: int | None = None,
+    approaches: Sequence[str] = tuple(APPROACHES),
+) -> None:
+    """Record the search for each house and approach, and write one page with all of them.
 
     Args:
         houses: ``(name, plan text)`` pairs, in the order the drop-down lists them.
@@ -583,6 +752,7 @@ def write_html(houses: Sequence[tuple[str, str]], path: Path, every: int | None 
         path: The HTML file to write.
         every: Record a frame every this many steps. ``None`` records every
             step, unless that would be more than ``MAX_FRAMES`` frames.
+        approaches: Keys of ``APPROACHES`` to record, in drop-down order.
 
     Raises:
         ValueError: If a plan cannot be parsed at all. The message names the house.
@@ -595,29 +765,36 @@ def write_html(houses: Sequence[tuple[str, str]], path: Path, every: int | None 
         except ValueError as error:
             raise ValueError(f"{name}: {error}") from error
         pace = every or max(1, math.ceil(estimate_steps(grid) / MAX_FRAMES))
-        recorder = FrameRecorder(plan, grid, pace)
-        trace_plan(recorder, grid, labels)
-        records.append(_house(name, recorder))
+        runs = []
+        for key in approaches:
+            recorder = FrameRecorder(plan, grid, pace)
+            APPROACHES[key].run(recorder, grid, labels)
+            runs.append(_run(key, recorder))
+        records.append({"name": name, "runs": runs})
 
     path.write_text(_page(records), encoding="utf-8")
 
 
-def _house(name: str, recorder: FrameRecorder) -> dict:
-    """Package one recorded house for the page.
+def _run(key: str, recorder: FrameRecorder) -> dict:
+    """Package one approach's recording of one house for the page.
 
     Returns:
-        The house's ``name``, grid size, recorded frames (``keyframes``,
-        ``deltas``, ``statuses``), ``areaStarts``, the Plotly ``trace`` and
-        ``layout``, and the ``result`` text: the final report, or the reason
-        the plan was rejected.
+        The ``approach`` key, its ``label`` and ``about`` text, the grid size,
+        the recorded frames (``keyframes``, ``deltas``, ``statuses``),
+        ``areaStarts``, the ``reports`` so far, the Plotly ``trace`` and
+        ``layout``, and the ``result`` text: the final report, or the reason the
+        plan was rejected, shown on the last frame.
     """
+    approach = APPROACHES[key]
     if recorder.first_error is not None:
-        result = f"count_chairs rejects this plan: {recorder.first_error}"
+        result = f"{approach.function} rejects this plan: {recorder.first_error}"
     else:
         result = format_report(recorder.report)
     trace, layout = _figure(recorder)
     return {
-        "name": name,
+        "approach": key,
+        "label": approach.label,
+        "about": approach.about,
         "width": recorder.width,
         "height": recorder.height,
         "keyEvery": KEYFRAME_EVERY,
@@ -625,6 +802,7 @@ def _house(name: str, recorder: FrameRecorder) -> dict:
         "deltas": recorder.deltas,
         "statuses": recorder.statuses,
         "areaStarts": recorder.area_starts,
+        "reports": recorder.reports,
         "trace": trace,
         "layout": layout,
         "result": result,
@@ -690,7 +868,8 @@ def _page(houses: list[dict]) -> str:
     """Fill in the page template with the legend and every house's data.
 
     Args:
-        houses: Entries from ``_house``.
+        houses: ``{"name": ..., "runs": [...]}`` for each house, where each run
+            comes from ``_run``.
 
     Returns:
         The complete HTML page.
@@ -765,6 +944,7 @@ PAGE = Template("""<!doctype html>
   .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px;
             border: 1px solid var(--border); vertical-align: -2px; margin-right: 6px; }
   .report { flex: 1; min-height: 0; overflow: auto; }
+  #about { margin: 0 0 10px; color: var(--muted); font-size: 12px; }
   #result { margin: 0; font: 12px/1.45 Consolas, Menlo, monospace; white-space: pre-wrap; }
   /* Narrow screens: stack everything and let the page scroll. */
   @media (max-width: 900px) {
@@ -779,6 +959,7 @@ PAGE = Template("""<!doctype html>
 <header>
   <h1>Chair counter search</h1>
   <span id="picker"><label for="house">House</label> <select id="house"></select></span>
+  <span id="approach-picker"><label for="approach">Approach</label> <select id="approach"></select></span>
   <button id="play" type="button" title="Play or pause (Space)">&#9654; Play</button>
   <button id="prev-area" type="button" title="Start of the previous area (Page Up)">&#9198; Area</button>
   <button id="prev" type="button" title="Previous step (Left arrow)">&#9664;</button>
@@ -808,7 +989,9 @@ PAGE = Template("""<!doctype html>
 $legend
     </ul>
     <section class="report panel">
-      <h2>Final report</h2>
+      <h2 id="approach-name"></h2>
+      <p id="about"></p>
+      <h2 id="report-title">Report so far</h2>
       <pre id="result"></pre>
     </section>
   </aside>
@@ -819,18 +1002,21 @@ const FIRST_CODE_CHAR = $first_code_char;
 const chart = document.getElementById("chart");
 const status = document.getElementById("status");
 const picker = document.getElementById("house");
+const approachPicker = document.getElementById("approach");
 const playButton = document.getElementById("play");
 const slider = document.getElementById("frame");
 const position = document.getElementById("position");
 const speed = document.getElementById("speed");
 const stopAtArea = document.getElementById("stop-at-area");
-let house = HOUSES[0];
+let house = HOUSES[0].runs[0];  // The recording on screen: one house, one approach.
 let codes = [];     // Colour code of every cell in the frame on screen.
 let current = 0;    // Frame on screen.
 let timer = null;   // Set while playing.
 
 HOUSES.forEach((item, index) => picker.add(new Option(item.name, String(index))));
 if (HOUSES.length < 2) document.getElementById("picker").hidden = true;
+HOUSES[0].runs.forEach((run, index) => approachPicker.add(new Option(run.label, String(index))));
+if (HOUSES[0].runs.length < 2) document.getElementById("approach-picker").hidden = true;
 
 const lastFrame = () => house.statuses.length - 1;
 
@@ -863,7 +1049,20 @@ function draw() {
 }
 
 // Show frame `index` in the status panel, slider and step counter.
+// The report as it stands at frame `index`; the final report on the last frame.
+function showReport(index) {
+  const done = index === lastFrame();
+  let text = "";
+  for (const [frame, report] of house.reports) {
+    if (frame > index) break;
+    text = report;
+  }
+  document.getElementById("report-title").textContent = done ? "Final report" : "Report so far";
+  document.getElementById("result").textContent = done ? house.result : text;
+}
+
 function show(index) {
+  showReport(index);
   current = index;
   slider.value = String(index);
   const lines = house.statuses[index];
@@ -927,12 +1126,14 @@ function fitText() {
   Plotly.restyle(chart, { "textfont.size": Math.max(5, Math.floor(cell * 0.62)) }, [0]);
 }
 
-function load(index, frame = 0) {
+function load(index, approach = 0, frame = 0) {
   pause();
-  house = HOUSES[index];
+  house = HOUSES[index].runs[approach];
   picker.value = String(index);
+  approachPicker.value = String(approach);
   slider.max = String(lastFrame());
-  document.getElementById("result").textContent = house.result;
+  document.getElementById("approach-name").textContent = house.label;
+  document.getElementById("about").textContent = house.about;
   rebuild(0);
   current = 0;
   Plotly.purge(chart);
@@ -945,10 +1146,14 @@ function load(index, frame = 0) {
     });
 }
 
-picker.addEventListener("change", () => {
-  load(Number(picker.value));
-  history.replaceState(null, "", "#house=" + encodeURIComponent(house.name));
-});
+// Load the house and approach the drop-downs show, and remember them in the address.
+function choose() {
+  load(Number(picker.value), Number(approachPicker.value));
+  const name = HOUSES[Number(picker.value)].name;
+  history.replaceState(null, "", "#house=" + encodeURIComponent(name) + "&approach=" + house.approach);
+}
+picker.addEventListener("change", choose);
+approachPicker.addEventListener("change", choose);
 playButton.addEventListener("click", () => (timer ? pause() : play()));
 document.getElementById("prev").addEventListener("click", () => { pause(); go(current - 1); });
 document.getElementById("next").addEventListener("click", () => { pause(); go(current + 1); });
@@ -973,7 +1178,9 @@ window.addEventListener("resize", () => {
 const hash = location.hash.slice(1);
 const params = new URLSearchParams(/^\\d+$$/.test(hash) ? "frame=" + hash : hash);
 const named = HOUSES.findIndex((item) => item.name === params.get("house"));
-load(Math.max(0, named), Number(params.get("frame")) || 0);
+const runs = HOUSES[Math.max(0, named)].runs;
+const approachIndex = runs.findIndex((run) => run.approach === params.get("approach"));
+load(Math.max(0, named), Math.max(0, approachIndex), Number(params.get("frame")) || 0);
 </script>
 </body>
 </html>

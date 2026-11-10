@@ -11,7 +11,7 @@ from pathlib import Path
 from chair_counter import count_chairs, format_report
 from chair_counter.cli import collect_plans, main
 from chair_counter.floor_plan import _find_areas, _parse_plan
-from chair_counter.plotly_html import FrameRecorder, trace_plan, write_html
+from chair_counter.plotly_html import FrameRecorder, trace_plan, trace_room_seeded, write_html
 
 TWO_ROOMS = (
     "+---------+---------+\n"
@@ -28,14 +28,18 @@ def houses_in(page: str) -> list[dict]:
     return json.loads(payload)["houses"]
 
 
-def record(houses: list[tuple[str, str]], every: int | None = None) -> list[dict]:
-    """Write a page for the houses and return their embedded data."""
+def record(
+    houses: list[tuple[str, str]], every: int | None = None, approach: str = "connected-areas"
+) -> list[dict]:
+    """Write a page for the houses and return each house's recording of one approach."""
     with tempfile.TemporaryDirectory() as folder:
         path = Path(folder) / "search.html"
         write_html(houses, path, every=every)
         page = path.read_text(encoding="utf-8")
-    assert '<button id="play"' in page
-    return houses_in(page)
+    assert '<button id="play"' in page and '<select id="approach">' in page
+    runs = [{run["approach"]: run for run in house["runs"]} for house in houses_in(page)]
+    return [{**by_approach[approach], "name": house["name"]}
+            for house, by_approach in zip(houses_in(page), runs)]
 
 
 def run_cli(*argv: str) -> str:
@@ -105,11 +109,13 @@ class AnimationTests(unittest.TestCase):
                 if expected != self.codes:
                     raise AssertionError(f"Colours differ at step {self.step_number}.")
 
-        for plan in (TWO_ROOMS, LEAKY):
-            grid, labels = _parse_plan(plan)
-            recorder = CheckedRecorder(plan, grid)
-            trace_plan(recorder, grid, labels)
-            self.assertEqual(len(recorder.deltas), recorder.step_number)
+        for plan in (TWO_ROOMS, LEAKY, "+---+---+\n|(A)|(A)|\n+---+---+\n"):
+            for run in (trace_plan, trace_room_seeded):
+                with self.subTest(plan=plan, run=run.__name__):
+                    grid, labels = _parse_plan(plan)
+                    recorder = CheckedRecorder(plan, grid)
+                    run(recorder, grid, labels)
+                    self.assertEqual(len(recorder.deltas), recorder.step_number)
 
     def test_walls_change_colour_once_a_fill_finds_them(self) -> None:
         """Walls start unfound, belong to the area that bumps into them, then stay found."""
@@ -134,6 +140,56 @@ class AnimationTests(unittest.TestCase):
         self.assertEqual({recorder.cell_state(wall, set())[0] for wall in walls}, {"wall-found"})
         steps = "\n".join(status[1] for status in recorder.statuses)
         self.assertIn("It is part of the boundary of area 1 (Studio).", steps)
+
+    def test_room_seeded_recording_follows_its_own_search(self) -> None:
+        """Fill the exterior, scan for the total, then fill from each label."""
+        house = record([("two rooms", TWO_ROOMS)], approach="room-seeded")[0]
+        steps = [status[1] for status in house["statuses"]]
+
+        self.assertTrue(steps[0].startswith("Start the exterior fill at border cell (0, 0)"))
+        self.assertTrue(any("Next, scan every cell for chairs that are not outside" in s for s in steps))
+        self.assertTrue(any("holds chair P and is not outside, so add it to the apartment total" in s
+                            for s in steps))
+        self.assertTrue(any("Start a flood fill from the label (Studio) at line 2, col 2" in s for s in steps))
+        self.assertTrue(any("room 'Studio' is complete" in s for s in steps))
+        self.assertEqual(len(house["areaStarts"]), 2)  # The exterior and Studio only.
+        self.assertEqual(house["result"], format_report(count_chairs(TWO_ROOMS)))
+
+    def test_room_seeded_marks_unlabelled_space_and_ends_without_highlights(self) -> None:
+        """The unlabelled space stays marked as swept, its chair as counted, and nothing is yellow at the end."""
+        grid, labels = _parse_plan(TWO_ROOMS)
+        recorder = FrameRecorder(TWO_ROOMS, grid)
+        trace_room_seeded(recorder, grid, labels)
+
+        state = lambda cell: recorder.cell_state(cell, set())[0]  # noqa: E731
+        self.assertEqual(state((3, 13)), "chair-total")  # The P in the unlabelled space.
+        self.assertEqual(state((2, 14)), "inside-swept")
+        self.assertEqual(state((3, 3)), "area")  # The W, claimed by the Studio fill.
+        self.assertTrue(any(s[1].startswith("The scan moves past") and "Row 2 is done" in s[1]
+                            for s in recorder.statuses))
+        for run in (trace_plan, trace_room_seeded):
+            recorder = FrameRecorder(TWO_ROOMS, grid)
+            run(recorder, grid, labels)
+            self.assertEqual(recorder.scan_path, set(), run.__name__)
+
+    def test_report_panel_counts_up_as_the_frames_play(self) -> None:
+        """Start from zero counts, change only as chairs are counted, and end on the final report."""
+        for approach in ("connected-areas", "room-seeded"):
+            with self.subTest(approach=approach):
+                house = record([("two rooms", TWO_ROOMS)], approach=approach)[0]
+                frames = [frame for frame, _ in house["reports"]]
+                self.assertEqual(frames[0], 0)
+                self.assertEqual(frames, sorted(set(frames)))
+                self.assertEqual(house["reports"][0][1].splitlines()[1], "W: 0, P: 0, S: 0, C: 0")
+                self.assertEqual(house["reports"][-1][1], house["result"])
+                self.assertGreater(len(frames), 2)
+
+    def test_room_seeded_recording_stops_at_the_first_error(self) -> None:
+        """Show the error and stop, as count_chairs_room_seeded does."""
+        house = record([("leaky", LEAKY)], approach="room-seeded")[0]
+
+        self.assertTrue(house["result"].startswith("count_chairs_room_seeded rejects this plan"))
+        self.assertIn("The search stops here and rejects the plan", house["statuses"][-2][1])
 
     def test_several_houses_keep_each_result(self) -> None:
         """Put every house on one page, including the error for a rejected plan."""
@@ -185,8 +241,22 @@ class CliTests(unittest.TestCase):
         page = (self.output / "search.html").read_text(encoding="utf-8")
         houses = houses_in(page)
         self.assertEqual([house["name"] for house in houses], ["family house", "studio"])
-        self.assertEqual(houses[0]["statuses"][1][0], "Step 6 | the outside")
+        self.assertEqual(houses[0]["runs"][0]["statuses"][1][0], "Step 6 | the outside")
         self.assertIn(f"== {self.plans / 'studio.txt'}\ntotal:", printed)
+
+    def test_animation_has_both_approaches_opening_on_the_chosen_one(self) -> None:
+        """Record both approaches, with the --approach choice first in the drop-down."""
+        plan = str(self.plans / "studio.txt")
+        for approach, order in (
+            ("connected-areas", ["connected-areas", "room-seeded"]),
+            ("room-seeded", ["room-seeded", "connected-areas"]),
+        ):
+            with self.subTest(approach=approach):
+                run_cli("--approach", approach, plan, "--output", str(self.output), "--animation")
+                page = (self.output / "studio_search.html").read_text(encoding="utf-8")
+                runs = houses_in(page)[0]["runs"]
+                self.assertEqual([run["approach"] for run in runs], order)
+                self.assertEqual(runs[0]["result"], runs[1]["result"])
 
     def test_bad_option_combinations_exit_with_code_2(self) -> None:
         """Refuse --animation without --output, and --every without --animation or below 1."""
@@ -195,6 +265,7 @@ class CliTests(unittest.TestCase):
             [plan, "--animation"],
             [plan, "--output", str(self.output), "--every", "5"],
             [plan, "--output", str(self.output), "--animation", "--every", "0"],
+            [plan, "--approach", "breadth-first"],
         ):
             with self.subTest(argv=argv):
                 with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as stopped:

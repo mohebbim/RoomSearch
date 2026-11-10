@@ -50,7 +50,16 @@ The events are:
 - ``"label"`` and ``"chair"``: the area being filled recorded a room name
   (``name``) or a chair (``chair``). Both come with ``area``.
 
-``count_chairs`` uses ``_no_trace``, so tracing costs nothing there.
+The room-seeded approach in ``room_seeded.py`` also reports:
+
+- ``"seed"``: a fill starts at a chosen cell. ``role`` is ``"exterior"`` or
+  ``"room"`` (with the room's ``name``), and ``area`` is the area to fill.
+- ``"exterior"``: the exterior is filled and contains no chair or label.
+- ``"total"``: the total scan looked at a cell. ``result`` is ``"outside"``,
+  ``"wall"``, ``"floor"`` or ``"chair"``, and ``total`` is the running total.
+- ``"room"``: a room is filled and its subtotal stored under ``name``.
+
+The counting functions use ``_no_trace``, so tracing costs nothing there.
 """
 
 
@@ -203,15 +212,15 @@ def _find_areas(
     """Split the grid into connected areas and yield them one at a time.
 
     The scan visits every cell row by row. A wall or an already visited cell is
-    skipped. Any other cell starts a new area, which ``_walk_area`` fills while
-    this function records the labels and chairs it passes over. The first area
-    is always the outside of the building.
+    skipped. Any other cell starts a new area, which ``_fill_area`` fills while
+    recording the labels and chairs it passes over. The first area is always
+    the outside of the building.
 
     Args:
         grid: The padded grid from ``_parse_plan``.
         labels: Room names by position, from ``_parse_plan``.
-        trace: Receives ``"scan"``, ``"label"`` and ``"chair"`` events, plus the
-            events of ``_walk_area`` (see ``Trace``).
+        trace: Receives ``"scan"`` events, plus the events of ``_fill_area``
+            (see ``Trace``).
 
     Yields:
         Each area once it has been completely filled.
@@ -230,17 +239,80 @@ def _find_areas(
 
             area = Area(cells=[], chairs=Counter(), names=[])
             trace("scan", start, result="new area", area=area)
-            for position in _walk_area(grid, start, visited, trace):
-                area.cells.append(position)
-                name = labels.get(position)
-                if name is not None:
-                    area.names.append(name)
-                    trace("label", position, name=name, area=area)
-                marker = grid[position[0]][position[1]]
-                if marker in CHAIR_TYPES:
-                    area.chairs[marker] += 1
-                    trace("chair", position, chair=marker, area=area)
-            yield area
+            yield _fill_area(grid, labels, start, visited, area, trace)
+
+
+def _fill_area(
+    grid: list[str],
+    labels: dict[Position, str],
+    start: Position,
+    visited: set[Position],
+    area: Area,
+    trace: Trace = _no_trace,
+) -> Area:
+    """Flood-fill from ``start`` and record each cell, label and chair in ``area``.
+
+    Both counting approaches use this: the connected-areas scan for every area
+    it finds, and ``room_seeded`` for the exterior and for each room label.
+
+    Args:
+        grid: The padded grid from ``_parse_plan``.
+        labels: Room names by position, from ``_parse_plan``.
+        start: An open cell that is not yet in ``visited``.
+        visited: Cells already assigned to an area. Updated as cells are reached.
+        area: An empty ``Area`` to fill in.
+        trace: Receives ``"label"`` and ``"chair"`` events, plus the events of
+            ``_walk_area`` (see ``Trace``).
+
+    Returns:
+        ``area``, now holding every cell reached and the labels and chairs in them.
+    """
+    for position in _walk_area(grid, start, visited, trace):
+        area.cells.append(position)
+        name = labels.get(position)
+        if name is not None:
+            area.names.append(name)
+            trace("label", position, name=name, area=area)
+        marker = grid[position[0]][position[1]]
+        if marker in CHAIR_TYPES:
+            area.chairs[marker] += 1
+            trace("chair", position, chair=marker, area=area)
+    return area
+
+
+# Input rules, shared by both counting approaches ------------------------------
+
+
+def _check_exterior(area: Area) -> None:
+    """Reject the plan if the outside holds a chair or label, i.e. the outer walls have a gap."""
+    if area.names or area.chairs:
+        raise ValueError(
+            "A room label or chair is connected to the exterior. "
+            "Check the outer walls for gaps."
+        )
+
+
+def _room_name(area: Area) -> str | None:
+    """Return the area's room name, or ``None`` if it has no label.
+
+    Raises:
+        ValueError: If the area has more than one label, because then two
+            rooms share one space without a wall between them.
+    """
+    if len(area.names) > 1:
+        raise ValueError(f"One connected area has multiple room labels: {', '.join(area.names)}.")
+    return area.names[0] if area.names else None
+
+
+def _add_room(report: ChairReport, name: str, chairs: Counter[str]) -> None:
+    """Store a room's chair subtotal in the report.
+
+    Raises:
+        ValueError: If another room already has this name.
+    """
+    if name in report.rooms:
+        raise ValueError(f"Duplicate room label {name!r}.")
+    report.rooms[name] = chairs
 
 
 def _add_area(report: ChairReport, area: Area) -> None:
@@ -258,21 +330,11 @@ def _add_area(report: ChairReport, area: Area) -> None:
             than one label, or a room name is used twice.
     """
     if area.is_exterior:
-        if area.names or area.chairs:
-            raise ValueError(
-                "A room label or chair is connected to the exterior. "
-                "Check the outer walls for gaps."
-            )
+        _check_exterior(area)
         return
-
-    if len(area.names) > 1:
-        names = ", ".join(area.names)
-        raise ValueError(f"One connected area has multiple room labels: {names}.")
-    if area.names:
-        name = area.names[0]
-        if name in report.rooms:
-            raise ValueError(f"Duplicate room label {name!r}.")
-        report.rooms[name] = area.chairs
+    name = _room_name(area)
+    if name is not None:
+        _add_room(report, name, area.chairs)
     report.total.update(area.chairs)
 
 

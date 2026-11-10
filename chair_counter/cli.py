@@ -2,12 +2,14 @@
 
 Run ``python -m chair_counter PLAN`` (or ``chair-counter PLAN`` after
 installing). The report goes to standard output, in the exact format the old
-system reads. A folder stands for every ``.txt`` plan in it.
+system reads. A folder stands for every ``.txt`` plan in it. ``--approach``
+picks the counting method (see ``APPROACHES``); both give the same report.
 
 Everything else is optional and goes into the folder given by ``--output DIR``:
 
 - ``DIR/<plan>_report.txt``: the report of each plan.
-- With ``--animation``: a web page that animates the search, step by step.
+- With ``--animation``: a web page that animates the search, step by step,
+  for both approaches, opening on the one ``--approach`` chose.
   One plan gives ``DIR/<plan>_search.html``; several give ``DIR/search.html``,
   with a drop-down to pick the house. ``--every N`` records one frame every
   ``N`` steps instead of every step, for a smaller page.
@@ -21,6 +23,18 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .floor_plan import count_chairs, format_report
+from .room_seeded import count_chairs_room_seeded
+
+APPROACHES = {
+    "connected-areas": count_chairs,
+    "room-seeded": count_chairs_room_seeded,
+}
+"""The counting functions ``--approach`` can choose. Both give the same report.
+
+- ``connected-areas`` (default): find every connected area, then name each one.
+- ``room-seeded``: flood-fill from each room label; see ``room_seeded.py``.
+"""
+DEFAULT_APPROACH = "connected-areas"
 
 DESCRIPTION = (
     "Count the chairs in an ASCII floor plan, "
@@ -50,6 +64,8 @@ example:
     W: 1, P: 0, S: 0, C: 1
 
 more examples:
+  %(prog)s --approach room-seeded rooms.txt
+      count by flood-filling from each room name instead; same report
   %(prog)s rooms.txt --output output
       also save output/rooms_report.txt
   %(prog)s rooms.txt --output output --animation
@@ -127,6 +143,16 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         help="a floor plan text file, or a folder of .txt plans; several may be given",
     )
     parser.add_argument(
+        "--approach",
+        choices=APPROACHES,
+        default=DEFAULT_APPROACH,
+        help=(
+            "how to count: connected-areas finds every enclosed area first, "
+            "room-seeded fills outwards from each room name "
+            f"(default: {DEFAULT_APPROACH}; both give the same report)"
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         metavar="DIR",
@@ -136,7 +162,8 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         "--animation",
         action="store_true",
         help=(
-            f"with --output, also write a web page that animates the search: "
+            f"with --output, also write a web page that animates the search of both "
+            f"approaches, opening on --approach: "
             f"DIR/<plan>{ANIMATION_SUFFIX}, or DIR/{COMBINED_ANIMATION} for several plans"
         ),
     )
@@ -170,6 +197,7 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> None:
         parser.error("--every only applies with --animation")
     if args.every is not None and args.every < 1:
         parser.error("--every must be at least 1")
+    count = APPROACHES[args.approach]
 
     try:
         paths = collect_plans(args.plans)
@@ -181,7 +209,7 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> None:
         try:
             # utf-8-sig also accepts files that start with a byte order mark (BOM).
             plan = path.read_text(encoding="utf-8-sig")
-            text = format_report(count_chairs(plan))
+            text = format_report(count(plan))
         except OSError as error:  # The message already names the file.
             parser.error(str(error))
         except ValueError as error:  # An invalid plan, or not UTF-8 text.
@@ -206,6 +234,9 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> None:
             from .plotly_html import house_name, write_html
 
             houses = [(house_name(path), plan) for path, plan, _ in results]
-            write_html(houses, animation_file(paths, args.output), every=args.every)
+            # Record every approach, the chosen one first, so the page opens on it
+            # and its drop-down can switch to the others.
+            order = [args.approach] + [key for key in APPROACHES if key != args.approach]
+            write_html(houses, animation_file(paths, args.output), every=args.every, approaches=order)
     except OSError as error:
         parser.error(str(error))
