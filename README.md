@@ -2,6 +2,9 @@
 
 Counts the chairs in an ASCII floor plan, for the whole apartment and for each room, and prints them in the exact text format the old system reads. Requires Python 3.10 or later. It uses only the standard library.
 
+- **How it works:** [docs/solution.md](docs/solution.md) explains the search algorithm step by step, with a worked example.
+- **Watch it run:** [open the animated search in your browser](https://raw.githack.com/mohebbim/RoomSearch/master/output/search.html), with all four sample houses. The file is [output/search.html](output/search.html); in a clone, open it straight from disk.
+
 ## Example with this repository
 
 The sample plans are in `inputs/` and the results go to `output/`. Run these from the repository folder:
@@ -100,6 +103,6 @@ The page is made by `chair_counter/plotly_html.py`. It runs the same search func
 | `chair_counter/cli.py` | The `python -m chair_counter` command and its options. |
 | `chair_counter/plotly_html.py` | The animation page, built on the counting functions. |
 | `inputs/` | Sample plans: `rooms.txt` (supplied), `studio.txt`, `family_house.txt`, `bungalow.txt`. |
-| `output/` | A report for each sample plan and `search.html` with all of them, made with the folder command above. |
+| [`output/`](output/) | A report for each sample plan and [`search.html`](output/search.html) with all of them, made with the folder command above. |
 | `tests/` | Unit tests. Run them with `python -m unittest -v`. |
-| `docs/solution.md` | The search algorithm, step by step, with a worked example. |
+| [`docs/solution.md`](docs/solution.md) | The search algorithm, step by step, with a worked example. |
