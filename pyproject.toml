@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "enspired-chair-counter"
+version = "0.1.0"
+description = "Count chairs by room in an ASCII floor plan."
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.scripts]
+chair-counter = "chair_counter.cli:main"
+
+[tool.setuptools]
+packages = ["chair_counter"]
